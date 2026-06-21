@@ -1,0 +1,39 @@
+# ghz config for direct gRPC stress against zonesvr:20001 (server-server CL).
+#
+# zonesvr's gRPC port (20001) is the CLC entry point — battlesvr calls into
+# it for cross-process state. Exercising it directly is mostly for scenario D
+# observation: when battlesvr calls back into a zonesvr that's hot-updating,
+# how does the gRPC layer behave?
+#
+# Usage:
+#   ghz --config stress/ghz/zonesvr_inner.yaml
+
+proto: ../../../cl-grpc/src/proto/common_api.proto
+import-paths:
+  - ../../../cl-grpc/src/proto
+call: dogsvr.CommonApiService/CommonUnaryApi
+host: 127.0.0.1:20001
+insecure: true
+
+total: 5000
+concurrency: 30
+rps: 0
+
+connections: 4
+
+timeout: 5s
+dial-timeout: 5s
+
+# We deliberately use ZONE_HEARTBEAT (cmd_id=20003 if defined; else any
+# cheap zonesvr cmd) so the call doesn't mutate state. Replace cmd_id with
+# the actual heartbeat / ping cmdId from your example-proj/src/protocols/cmd_id.ts.
+data:
+  head:
+    cmd_id: 20003
+    open_id: "stress_0"
+    zone_id: 1
+    gid: 8000000
+  inner_req: '{"clientTs":0}'
+
+format: pretty
+output: ./reports/last_ghz_zonesvr.json

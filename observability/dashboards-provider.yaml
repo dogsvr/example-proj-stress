@@ -1,0 +1,17 @@
+# Grafana dashboard provider for the otel-lgtm container.
+# Mounted into the container at:
+#   /otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml
+# Pairs with the dashboards/ directory mounted at:
+#   /otel-lgtm/grafana/conf/provisioning/dashboards/custom
+
+apiVersion: 1
+
+providers:
+    - name: dogsvr-stress
+      orgId: 1
+      folder: 'dogsvr stress'
+      type: file
+      disableDeletion: false
+      allowUiUpdates: true
+      options:
+          path: /otel-lgtm/grafana/conf/provisioning/dashboards/custom

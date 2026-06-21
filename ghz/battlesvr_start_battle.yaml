@@ -1,0 +1,46 @@
+# ghz config for direct gRPC stress against battlesvr:30001.
+#
+# Bypasses zonesvr — talks straight to battlesvr's gRPC server. Used to
+# isolate battlesvr's gRPC accept + cl-grpc routing from the zonesvr CLC
+# round-trip path that scenario B exercises end-to-end.
+#
+# Usage:
+#   ghz --config stress/ghz/battlesvr_start_battle.yaml
+#
+# Override on the CLI as needed:
+#   ghz --config ... --concurrency 100 --rps 500 --duration 60s
+
+# Connection
+proto: ../../../cl-grpc/src/proto/common_api.proto
+import-paths:
+  - ../../../cl-grpc/src/proto
+call: dogsvr.CommonApiService/CommonUnaryApi
+host: 127.0.0.1:30001
+insecure: true
+
+# Workload shape (override with --duration / --total / --rps as needed).
+total: 10000
+concurrency: 50
+rps: 0           # 0 = max throughput at concurrency limit
+
+# Connection pool — multiplexed gRPC streams per TCP conn.
+connections: 4
+
+# Timeouts (per call)
+timeout: 5s
+dial-timeout: 5s
+
+# Request body. The handler expects a JSON-encoded inner_req with syncType.
+# `cmd_id=30001` = BATTLE_START_BATTLE. open_id / zone_id / gid are required
+# headers; we use synthetic stress_<n> values that match the bot pool seeding.
+data:
+  head:
+    cmd_id: 30001
+    open_id: "stress_0"
+    zone_id: 1
+    gid: 8000000
+  inner_req: '{"syncType":"state_sync"}'
+
+# Output
+format: pretty
+output: ./reports/last_ghz_battlesvr.json

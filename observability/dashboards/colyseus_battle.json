@@ -1,0 +1,77 @@
+{
+  "title": "Colyseus Battle",
+  "uid": "colyseus-battle",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "2s",
+  "time": { "from": "now-5m", "to": "now" },
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Tick duration (p50/p95/p99) by roomType",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(colyseus_tick_duration_ms_bucket[30s])) by (le, roomType))",
+          "legendFormat": "p50/{{roomType}}", "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(colyseus_tick_duration_ms_bucket[30s])) by (le, roomType))",
+          "legendFormat": "p95/{{roomType}}", "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(colyseus_tick_duration_ms_bucket[30s])) by (le, roomType))",
+          "legendFormat": "p99/{{roomType}}", "refId": "C"
+        },
+        {
+          "expr": "16.67",
+          "legendFormat": "60fps budget (16.67ms)", "refId": "D"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Active rooms",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "colyseus_room_count", "legendFormat": "{{roomType}}", "refId": "A" }]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Total clients (sum across rooms)",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{ "expr": "sum(colyseus_room_clients) by (roomType)", "legendFormat": "{{roomType}}", "refId": "A" }]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Broadcast rate (msgs/s)",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "rate(colyseus_broadcast_msgs_total[30s])",
+        "legendFormat": "{{roomType}}", "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "battlesvr eventloop lag (s)",
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "nodejs_eventloop_lag_seconds{svr=\"battlesvr\"}",
+        "legendFormat": "{{role}}", "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    }
+  ]
+}

@@ -1,0 +1,71 @@
+{
+  "title": "Worker Scaling",
+  "uid": "worker-scaling",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Per-worker pending requests (zonesvr)",
+      "description": "When LB is well-balanced, the worker series should track each other within ~10%. Sustained divergence is a sign of LB misconfiguration or message-grain mismatch.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "dogsvr_worker_pending{svr=\"zonesvr\"}",
+        "legendFormat": "worker {{worker}}", "refId": "A"
+      }]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "QPS over time (compare across workerThreadNum runs)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum(rate(dogsvr_cmd_duration_ms_count{svr=\"zonesvr\"}[1m]))",
+        "legendFormat": "zonesvr total QPS", "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "P99 cmd duration vs worker count",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "histogram_quantile(0.99, sum(rate(dogsvr_cmd_duration_ms_bucket{svr=\"zonesvr\"}[1m])) by (le, cmdId))",
+        "legendFormat": "{{cmdId}}", "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Current zonesvr worker count (estimate)",
+      "description": "Counts distinct worker labels currently reporting non-empty pending samples.",
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "count(dogsvr_worker_pending{svr=\"zonesvr\"})",
+        "legendFormat": "active workers", "refId": "A"
+      }]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "main thread CPU vs worker CPU",
+      "description": "When QPS plateaus, the limiting role should approach 1.0 CPU.",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "rate(process_cpu_seconds_total{svr=\"zonesvr\"}[1m])",
+        "legendFormat": "{{role}}", "refId": "A"
+      }]
+    }
+  ]
+}
