@@ -2,7 +2,7 @@
 
 import { Bot, DEFAULT_ENDPOINTS } from '../bot_login';
 import { runBattleSession, DEFAULT_SESSION } from '../bot_battle';
-import { runPool } from '../bot_pool';
+import { runPool, rampedSetup } from '../bot_pool';
 import { startBotMetricsEndpoint, stopBotMetricsEndpoint, sumCounter } from '../otel_metrics_client';
 import { setupBotTracing, shutdownBotTracing } from '../otel_tracing_client';
 import { writeReport } from '../report';
@@ -44,30 +44,38 @@ async function main(): Promise<void> {
 
     const startedAt = Date.now();
 
-    await runPool({
-        scenario: SCENARIO,
-        concurrency: params.concurrency,
-        durationMs: params.durationMs,
-        rampMs: params.rampMs,
-        cycleFn: async (botIndex: number) => {
-            const seq = (params.gidBase - 8_000_000) + (botIndex % Math.max(1, params.concurrency));
-            const bot = new Bot(
-                {
-                    openId: `stress_${seq}`,
-                    zoneId: params.zoneId,
-                    name: `bot_${seq}`,
-                },
-                SCENARIO,
-                DEFAULT_ENDPOINTS,
-            );
-            try {
-                await bot.connectAndLogin();
-                await runBattleSession(bot, params.syncType, DEFAULT_SESSION);
-            } finally {
-                await bot.disconnect();
-            }
-        },
+    // Ramp phase: each bot logs in once, staggered across rampMs.
+    const bots = await rampedSetup(params.concurrency, params.rampMs, async (i: number) => {
+        const seq = (params.gidBase - 8_000_000) + (i % Math.max(1, params.concurrency));
+        const bot = new Bot(
+            {
+                openId: `stress_${seq}`,
+                zoneId: params.zoneId,
+                name: `bot_${seq}`,
+            },
+            SCENARIO,
+            DEFAULT_ENDPOINTS,
+        );
+        await bot.connectAndLogin();
+        return bot;
     });
+
+    // Steady-state: each bot repeatedly start_battle / join / leave, reusing
+    // its zonesvr WS + Colyseus Client. LOGIN is pressed once during ramp only.
+    const remainingMs = Math.max(0, params.durationMs - (Date.now() - startedAt));
+    try {
+        await runPool({
+            scenario: SCENARIO,
+            concurrency: params.concurrency,
+            durationMs: remainingMs,
+            rampMs: 0,
+            cycleFn: async (botIndex: number) => {
+                await runBattleSession(bots[botIndex], params.syncType, DEFAULT_SESSION);
+            },
+        });
+    } finally {
+        await Promise.allSettled(bots.map((b) => b.disconnect()));
+    }
 
     const finishedAt = Date.now();
     log.info({ durationMs: finishedAt - startedAt }, `${SCENARIO} finished, writing report`);

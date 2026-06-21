@@ -2,7 +2,7 @@
 // sends fake input on a 100ms tick, optionally collects broadcast frames,
 // then leaves. Designed to overlap many bots in the same process.
 
-import { Client, Room } from '@colyseus/sdk';
+import { Room } from '@colyseus/sdk';
 import type { ZoneStartBattleRes } from 'example-proj/protocols/cmd_proto';
 import { cmdRtt, cmdSuccessTotal, cmdErrorTotal, roomsJoined, classifyError } from './otel_metrics_client';
 import { startClientSpan } from './otel_tracing_client';
@@ -43,7 +43,8 @@ export async function runBattleSession(
     );
 
     // Colyseus connects directly to battlesvr's WS port using the ticket.
-    const colyseusClient = new Client(`ws://${bot.endpoints.zonesvrHost}:${startBattleRes.battleSvrAddr}`);
+    // Per-bot Client reuse — see Bot.getColyseusClient.
+    const colyseusClient = bot.getColyseusClient(`ws://${bot.endpoints.zonesvrHost}:${startBattleRes.battleSvrAddr}`);
     const roomType = `${syncType}_battle_room`;
 
     const room = await startClientSpan(

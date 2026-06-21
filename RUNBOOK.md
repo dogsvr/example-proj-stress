@@ -181,8 +181,12 @@ echo 'db.role_coll.countDocuments({openId: /^stress_/})' | mongosh --quiet 127.0
 ```sh
 cd bots
 node dist/scenarios/b_login_battle_end.js \
-    --concurrency 5 --duration 30000 --ramp 5000
+    --concurrency 5 --duration 30000 --ramp 5000 \
+    2> /tmp/stress-b-stderr.log
 ```
+
+`2> /tmp/stress-b-stderr.log` 把 bot stderr 落盘,把已知噪声(详见 §"已知噪声:
+bot stderr refId not found")从终端隔离;终端只剩 bot pino 业务日志(stdout)。
 
 bot 跑的同时打开浏览器看 Grafana,**三信号都要看到**:
 
@@ -233,7 +237,14 @@ node dist/scenarios/a_room_capacity.js \
 ```sh
 cd bots
 node dist/scenarios/b_login_battle_end.js \
-    --concurrency 100 --duration 300000 --ramp 60000
+    --concurrency 100 --duration 300000 --ramp 60000 \
+    2> /tmp/stress-b-stderr.log
+```
+
+跑完后粗略看下已知噪声量级(详见 §"已知噪声: bot stderr refId not found"):
+
+```sh
+echo "refId not found:        $(grep -c '\"refId\" not found' /tmp/stress-b-stderr.log)"
 ```
 
 观察点(Grafana `dogsvr Overview` dashboard):
@@ -328,6 +339,52 @@ bot 进程的 metrics 走"启 9201 PrometheusExporter,prom 5s 一次 pull-scrape
 ---
 
 ## Troubleshooting
+
+### 已知噪声: bot stderr `"refId" not found`
+
+**症状**:跑场景 B(及未来共享 cycle 结构的场景)>= 8 并发时,bot 进程 stderr 出现:
+
+```
+"refId" not found: <N> { previousRef: _ { ... }, previousRefId: <M> }
+Please report this issue to the developers.
+```
+
+频次随并发上升:8 并发 0 错(cycle 改造后已抑制),100 并发仍稳定出现。
+源头是 `@colyseus/schema/build/index.cjs:4761` 的 `console.error`(后续 `Please
+report …` 是同一调用紧跟的 `console.warn`,属于同一 decoder 失败,不单独统计)。
+
+**根因边界**(已收窄,详见 plan `0-stress-refid-known-facts.md`):
+
+- `@colyseus/schema` decoder 在**同 Node 进程内 ≥2 bot 同 server room**且
+  server 推 state_sync patch(ArraySchema churn)时,decoder 实例之间存在
+  跨实例污染,具体共享状态位置尚未定位,社区 issue 0.15 open。
+- **server 端 encoder 字节流是正常的**(8 进程 × 1 bot 同 room 时 0 错,
+  server 推同样字节流,decoder 不同 → 字节流不是源)。
+- bot 端 `room.leave(true)` 路径干净(100 并发场景 B 0 cycle failure)。
+- **真实 Web 玩家不踩**:浏览器一进程一 SDK 实例,不在该触发器画像里。
+
+**处理策略**:
+
+1. **stderr 重定向到文件**:跑命令统一加 `2> /tmp/stress-<场景>-stderr.log`
+   (见上文每个场景命令),把已知噪声从终端隔离,跑完用 `grep -c` 计数核对。
+2. **不计入 verdict**:`error_rate` 只看 cycle 整体 throw/不 throw,refId 不抛
+   → 计入 cycle success。这是**故意的**:压测 server 容量(dir/zonesvr/battlesvr/
+   mongo/redis 链路)不被 bot 解码 bug 干扰。
+
+**要注意的边界**(后续接手或扩展场景的人务必读):
+
+- **stderr 数量 ≠ 业务错误**:`/tmp/stress-*.log` 里 refId 计数高 ≠ 服务端坏了。
+  服务端健康看 dogsvr_cmd_duration_ms / mongo_op_duration_ms /
+  dogsvr_txn_timeout_total。
+- **bot 端任何依赖 state 解码的断言都不可信**。当前 verdict 只看 cycle 成败、
+  cmd RTT、HTTP/WS 通断,不读 room state,所以安全。**未来若加 "bot 校验
+  server state(分数 / ball 数 / hp)" 这类断言,decoder 漏帧会让断言假阳/假阴**,
+  必须改走多进程隔离(`bot_pool.ts` `IN_PROCESS_LIMIT=1` 强制 1 bot 1 进程,
+  代价:每 bot ~60-80MB RAM,100 bot 需 6-8GB)或不在 bot 侧做 state 断言。
+- **新场景沿用同样的 stderr 重定向 + grep 计数样板**;不要写代码层 filter
+  (`console.error/warn` monkey-patch 易漏新 SDK 路径,曾尝试已回退)。
+- **已知 pattern 计数若反常上涨**(比如 100 并发突然涨到原来 10×),说明
+  触发器画像变了,回到 plan `0-stress-refid-known-facts.md` 重新收窄,**别忽视**。
 
 ### `/metrics` 返回 404 或连接拒绝
 

@@ -104,6 +104,27 @@ export async function runPool(opts: PoolOptions): Promise<void> {
     }
 }
 
+/**
+ * Stagger N setup tasks over rampMs (same i*ramp/concurrency offset rule as
+ * runInProcess), collect their return values into a positional array.
+ * Any setupFn rejection rejects the whole call.
+ */
+export async function rampedSetup<T>(
+    concurrency: number,
+    rampMs: number,
+    setupFn: (botIndex: number) => Promise<T>,
+): Promise<T[]> {
+    const tasks: Promise<T>[] = [];
+    for (let i = 0; i < concurrency; i++) {
+        const offsetMs = rampMs > 0 ? Math.floor((i * rampMs) / concurrency) : 0;
+        tasks.push((async () => {
+            if (offsetMs > 0) await sleep(offsetMs);
+            return setupFn(i);
+        })());
+    }
+    return Promise.all(tasks);
+}
+
 /** Cleanup: ensure all bots disconnect at scenario end. */
 export async function disconnectAll(bots: Bot[]): Promise<void> {
     await Promise.allSettled(bots.map((b) => b.disconnect()));

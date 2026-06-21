@@ -1,6 +1,7 @@
 // Single-bot login flow: dir (HTTP) + zonesvr (WS) via tsrpc Node SDK.
 
 import { WsClient, HttpClient } from 'tsrpc';
+import { Client as ColyseusClient } from '@colyseus/sdk';
 import { serviceProto, type ServiceType } from '@dogsvr/cl-tsrpc/protocols/serviceProto';
 import * as cmdId from 'example-proj/protocols/cmd_id';
 import type {
@@ -52,6 +53,8 @@ export class Bot {
 
     private zoneClient: WsClient<ServiceType> | null = null;
     private role: BotRole | null = null;
+    private colyseusClient: ColyseusClient | null = null;
+    private colyseusEndpoint: string | null = null;
 
     constructor(creds: LoginCredentials, scenario: string, endpoints: BotEndpoints = DEFAULT_ENDPOINTS) {
         this.creds = creds;
@@ -65,6 +68,20 @@ export class Bot {
 
     isConnected(): boolean {
         return this.zoneClient?.isConnected ?? false;
+    }
+
+    /**
+     * Per-bot Colyseus Client reuse: same endpoint → return existing; different
+     * endpoint → replace + new. Avoids the per-cycle `new Client()` churn that
+     * appears to feed schema decoder cross-instance pollution.
+     */
+    getColyseusClient(endpoint: string): ColyseusClient {
+        if (this.colyseusClient && this.colyseusEndpoint === endpoint) {
+            return this.colyseusClient;
+        }
+        this.colyseusClient = new ColyseusClient(endpoint);
+        this.colyseusEndpoint = endpoint;
+        return this.colyseusClient;
     }
 
     /** Anonymous dir HTTP call. */
@@ -135,6 +152,8 @@ export class Bot {
             await this.zoneClient.disconnect();
         }
         this.zoneClient = null;
+        this.colyseusClient = null;
+        this.colyseusEndpoint = null;
     }
 
     /** Reconnect after a transient drop (used by scenario D). */
