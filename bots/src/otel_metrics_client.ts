@@ -135,16 +135,16 @@ export const cmdSuccessTotal = {
 };
 
 export const cycleSuccessTotal = {
-    add(attrs: { scenario: string }): void {
+    add(attrs: { scenario: string; op?: string }): void {
         cycleSuccessHist?.add(1, attrs);
-        bumpMirror('bot_cycle_success_total', attrs, 1);
+        bumpMirror('bot_cycle_success_total', attrs as Record<string, string>, 1);
     },
 };
 
 export const cycleFailureTotal = {
-    add(attrs: { scenario: string; phase: string }): void {
+    add(attrs: { scenario: string; phase: string; op?: string }): void {
         cycleFailureHist?.add(1, attrs);
-        bumpMirror('bot_cycle_failure_total', attrs, 1);
+        bumpMirror('bot_cycle_failure_total', attrs as Record<string, string>, 1);
     },
 };
 

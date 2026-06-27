@@ -6,6 +6,7 @@ import { Room } from '@colyseus/sdk';
 import type { ZoneStartBattleRes } from 'example-proj/protocols/cmd_proto';
 import { cmdRtt, cmdSuccessTotal, cmdErrorTotal, roomsJoined, classifyError } from './otel_metrics_client';
 import { startClientSpan } from './otel_tracing_client';
+import { sleepUntil, raceAbort, BotAbortError } from './bot_runtime';
 import type { Bot } from './bot_login';
 import { log } from './log';
 
@@ -24,26 +25,25 @@ export const DEFAULT_SESSION: BattleSessionOptions = {
     reportKills: true,
 };
 
+/** Hard cap for room.leave() during shutdown — server may not ack quickly. */
+const LEAVE_TIMEOUT_MS = 1500;
+
 /** Run one full battle session: join → tick input → leave. */
 export async function runBattleSession(
     bot: Bot,
     syncType: 'state_sync' | 'lockstep_sync',
     opts: BattleSessionOptions = DEFAULT_SESSION,
+    abortSignal?: AbortSignal,
 ): Promise<void> {
+    const signal = abortSignal ?? new AbortController().signal;
+
     const startBattleStart = process.hrtime.bigint();
-    let startBattleRes: ZoneStartBattleRes;
-    try {
-        startBattleRes = await bot.startBattle(syncType);
-    } catch (err) {
-        throw err;
-    }
+    const startBattleRes: ZoneStartBattleRes = await raceAbort(bot.startBattle(syncType), signal);
     cmdRtt.record(
         Number(process.hrtime.bigint() - startBattleStart) / 1e6,
         { cmd: 'ZONE_START_BATTLE_to_RES', scenario: bot.scenario },
     );
 
-    // Colyseus connects directly to battlesvr's WS port using the ticket.
-    // Per-bot Client reuse — see Bot.getColyseusClient.
     const colyseusClient = bot.getColyseusClient(`ws://${bot.endpoints.zonesvrHost}:${startBattleRes.battleSvrAddr}`);
     const roomType = `${syncType}_battle_room`;
 
@@ -52,22 +52,36 @@ export async function runBattleSession(
         { 'colyseus.room_type': roomType, 'bot.syncType': syncType },
         async () => {
             const joinStart = process.hrtime.bigint();
+            const joinPromise = colyseusClient.joinOrCreate<unknown>(roomType, { ticket: startBattleRes.ticket });
+            // If abort wins the race, a late-resolved Room would schedule ~65s of SDK reconnect timers blocking exit.
+            joinPromise.then(
+                (orphan) => {
+                    if (!signal.aborted) return;
+                    const r = orphan as unknown as Room & { reconnection: { enabled: boolean } };
+                    r.reconnection.enabled = false;
+                    try { r.leave(false); } catch { /* noop */ }
+                },
+                () => { /* surfaced via raceAbort */ },
+            );
             try {
-                const r = await colyseusClient.joinOrCreate<unknown>(roomType, { ticket: startBattleRes.ticket });
+                const r = await raceAbort(joinPromise, signal);
                 cmdRtt.record(Number(process.hrtime.bigint() - joinStart) / 1e6, { cmd: 'COLYSEUS_JOIN', scenario: bot.scenario });
                 cmdSuccessTotal.add({ cmd: 'COLYSEUS_JOIN', scenario: bot.scenario });
                 return r as Room;
             } catch (err) {
+                if (err instanceof BotAbortError) throw err;
                 cmdErrorTotal.add({ cmd: 'COLYSEUS_JOIN', scenario: bot.scenario, kind: classifyError(err) });
                 throw new Error(`colyseus joinOrCreate failed: ${(err as Error).message}`);
             }
         },
     );
+    // Disable SDK auto-reconnect: server close codes 1001/ABNORMAL/MAY_TRY_RECONNECT would otherwise hijack onLeave for ~65s.
+    (room as unknown as { reconnection: { enabled: boolean } }).reconnection.enabled = false;
     roomsJoined.inc(bot.scenario);
 
     let leftEarly = false;
     room.onLeave((code) => {
-        if (code !== 1000 && code !== 1001) {  // 1000=normal close, 1001=going away
+        if (code !== 1000 && code !== 1001) {
             log.debug({ sessionId: room.sessionId, code, scenario: bot.scenario }, 'colyseus onLeave abnormal');
         }
         leftEarly = true;
@@ -95,24 +109,32 @@ export async function runBattleSession(
     const inputTimer = setInterval(sendInput, opts.inputIntervalMs);
 
     try {
-        // Park for durationMs or until disconnect.
         await new Promise<void>((resolve) => {
             const timer = setTimeout(resolve, opts.durationMs);
-            room.onLeave(() => { clearTimeout(timer); resolve(); });
+            const onAbort = () => { clearTimeout(timer); signal.removeEventListener('abort', onAbort); resolve(); };
+            room.onLeave(() => { clearTimeout(timer); signal.removeEventListener('abort', onAbort); resolve(); });
+            signal.addEventListener('abort', onAbort, { once: true });
         });
     } finally {
         clearInterval(inputTimer);
     }
 
     if (!leftEarly) {
-        if (opts.reportKills && syncType === 'lockstep_sync') {
+        if (opts.reportKills && syncType === 'lockstep_sync' && !signal.aborted) {
             try { room.send('reportKills', 0); } catch { /* noop */ }
         }
         try {
-            await room.leave(true);
+            const leavePromise = room.leave(!signal.aborted);
+            await Promise.race([
+                leavePromise,
+                sleepUntil(LEAVE_TIMEOUT_MS, signal).then(() => undefined),
+            ]);
         } catch {
             // leave() can reject if the connection is already gone
         }
     }
     roomsJoined.dec(bot.scenario);
+
+    if (signal.aborted) throw new BotAbortError('battle aborted on shutdown');
 }
+
