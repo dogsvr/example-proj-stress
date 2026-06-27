@@ -3,7 +3,7 @@
 
 import { Bot, DEFAULT_ENDPOINTS } from '../bot_login';
 import { runBattleSession } from '../bot_battle';
-import { startBotMetricsEndpoint, stopBotMetricsEndpoint, sumCounterByLabel } from '../otel_metrics_client';
+import { startBotMetrics, stopBotMetrics, sumCounterByLabel } from '../otel_metrics_client';
 import { setupBotTracing, shutdownBotTracing } from '../otel_tracing_client';
 import { writeReport } from '../report';
 import { parseArgs, optNum, optStr, formatMs } from '../cli';
@@ -44,7 +44,7 @@ async function main(): Promise<void> {
     const params = readParams();
     log.info({ params }, `${SCENARIO} starting`);
     setupBotTracing({ serviceName: 'stress-bots' });
-    startBotMetricsEndpoint();
+    startBotMetrics();
 
     const startedAt = Date.now();
 
@@ -98,12 +98,12 @@ async function main(): Promise<void> {
             },
         },
         notes: [
-            `Grafana 'Colyseus Battle' panel 直接看:\n  - colyseus_tick_duration_ms p99 vs 16.67ms (60fps budget)\n  - colyseus_room_count + colyseus_room_clients\n  - battlesvr nodejs_eventloop_lag_seconds`,
+            `Grafana 'Colyseus Battle' panel 直接看:\n  - colyseus_tick_duration_milliseconds p99 vs 16.67ms (60fps budget)\n  - colyseus_room_count + colyseus_room_clients\n  - battlesvr nodejs_eventloop_lag_seconds`,
             `若 tick p99 持续超过 16.67ms,场景 A 的真实上限就在该房间数附近。`,
         ],
     });
 
-    await stopBotMetricsEndpoint();
+    await stopBotMetrics();
     await shutdownBotTracing();
 }
 

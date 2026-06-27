@@ -4,7 +4,7 @@
 # Between iterations:
 #   1. patch zonesvr/main_thread_config.json (workerThreadNum field)
 #   2. pm2 restart exp-zonesvr
-#   3. wait for /metrics on 9102 to come back up
+#   3. wait until prometheus has fresh OTLP samples for zonesvr
 #   4. invoke c_worker_scaling.js with --worker-thread-num <N>
 #
 # This script touches the live config + pm2 daemon. CLAUDE.md requires
@@ -46,12 +46,15 @@ patch_worker_count() {
 }
 
 wait_metrics_up() {
-    local url='http://127.0.0.1:9102/metrics'
+    # Poll prom until it has fresh OTLP samples from zonesvr (push interval 5s,
+    # so allow ~30s after pm2 restart for first export to land).
+    local query='dogsvr_cmd_duration_milliseconds_count{svr="zonesvr"}'
+    local url="http://127.0.0.1:9090/api/v1/query?query=$(node -e "console.log(encodeURIComponent('${query}'))")"
     for _ in $(seq 1 30); do
-        if curl -sf "$url" >/dev/null; then return 0; fi
+        if curl -sf "$url" | grep -q '"result":\[{'; then return 0; fi
         sleep 1
     done
-    echo "ERROR: zonesvr /metrics did not come back up after restart" >&2
+    echo "ERROR: zonesvr metrics did not appear in prometheus after restart" >&2
     exit 1
 }
 
@@ -62,7 +65,7 @@ for n in "${WORKER_COUNTS[@]}"; do
     patch_worker_count "$n"
     pm2 restart exp-zonesvr
     wait_metrics_up
-    sleep 2  # let workers register their /metrics ports
+    sleep 2
 
     pushd "${BOTS_DIR}" >/dev/null
     node dist/scenarios/c_worker_scaling.js \
@@ -79,4 +82,4 @@ done
 echo
 echo "All four iterations done. Check stress/reports/ for per-iteration summaries."
 echo "To compare across iterations, plot bot_cycle_success_total{scenario=~\"c_worker_scaling_w.+\"}"
-echo "and dogsvr_cmd_duration_ms p99 by workerThreadNum in Grafana."
+echo "and dogsvr_cmd_duration_milliseconds p99 by workerThreadNum in Grafana."

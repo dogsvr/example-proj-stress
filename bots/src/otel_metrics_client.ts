@@ -1,14 +1,18 @@
-// Client metrics for stress bots via OpenTelemetry SDK + PrometheusExporter.
-// Plain-counter mirror enables synchronous reads for scenario verdict logic.
+// Client metrics for stress bots via OpenTelemetry SDK + OTLP HTTP push.
+// Plain-counter mirror enables synchronous reads for in-process scenario verdict logic.
+// Cluster-mode scenarios (where mirror is per-process) read final counters from Prometheus
+// instead — see prom_query.ts.
 
 import { metrics, type Counter, type Histogram, type UpDownCounter } from '@opentelemetry/api';
-import { MeterProvider, AggregationType } from '@opentelemetry/sdk-metrics';
-import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
+import { MeterProvider, AggregationType, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
+import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 
+const DEFAULT_OTLP_METRICS_ENDPOINT = 'http://localhost:4318/v1/metrics';
 const RTT_BUCKETS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000];
 
 let provider: MeterProvider | null = null;
+let runId = '';
 
 let cmdRttHist: Histogram | null = null;
 let cmdErrorHist: Counter | null = null;
@@ -75,22 +79,24 @@ export function collectByLabel(name: string, key: string): Record<string, number
     return out;
 }
 
-export function startBotMetricsEndpoint(port = Number(process.env.STRESS_BOTS_PORT) || 9201): void {
+export function startBotMetrics(otlpEndpoint?: string): void {
     if (provider) return;
 
-    const exporter = new PrometheusExporter({
-        host: '127.0.0.1',
-        port,
-        endpoint: '/metrics',
-        appendTimestamp: false,
-    });
+    const url = otlpEndpoint
+        ?? process.env.STRESS_BOTS_OTLP_ENDPOINT
+        ?? process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+        ?? DEFAULT_OTLP_METRICS_ENDPOINT;
+
+    const exporter = new OTLPMetricExporter({ url });
+
+    runId = process.env.STRESS_RUN_ID ?? `pid-${process.pid}`;
 
     provider = new MeterProvider({
         resource: resourceFromAttributes({ 'service.name': 'stress-bots' }),
-        readers: [exporter],
+        readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 5000 })],
         views: [
             {
-                instrumentName: 'bot_cmd_rtt_ms',
+                instrumentName: 'bot_cmd_rtt',
                 aggregation: { type: AggregationType.EXPLICIT_BUCKET_HISTOGRAM, options: { boundaries: RTT_BUCKETS } },
             },
         ],
@@ -98,7 +104,7 @@ export function startBotMetricsEndpoint(port = Number(process.env.STRESS_BOTS_PO
     metrics.setGlobalMeterProvider(provider);
 
     const meter = metrics.getMeter('stress-bots');
-    cmdRttHist        = meter.createHistogram('bot_cmd_rtt_ms',          { description: 'Round-trip latency observed by bots, by cmd label.', unit: 'ms' });
+    cmdRttHist        = meter.createHistogram('bot_cmd_rtt',             { description: 'Round-trip latency observed by bots, by cmd label.', unit: 'ms' });
     cmdErrorHist      = meter.createCounter('bot_cmd_error_total',       { description: 'Bot-side errors (timeout / disconnect / server_error / unknown).' });
     cmdSuccessHist    = meter.createCounter('bot_cmd_success_total',     { description: 'Bot-side successful calls.' });
     cycleSuccessHist  = meter.createCounter('bot_cycle_success_total',   { description: 'Full login→battle→end cycles completed without error.' });
@@ -107,55 +113,60 @@ export function startBotMetricsEndpoint(port = Number(process.env.STRESS_BOTS_PO
     roomsJoinedGauge  = meter.createUpDownCounter('bot_rooms_joined',    { description: 'Bots currently inside a Colyseus room.' });
 }
 
-export async function stopBotMetricsEndpoint(): Promise<void> {
+export async function stopBotMetrics(): Promise<void> {
     await provider?.shutdown();
     provider = null;
 }
 
-// ---- Helper API (record/inc shape). ----
+// ---- Helper API (record/inc shape). All Counters/Gauges auto-tag run_id
+// so prom_query.ts can isolate runs via {run_id="..."}.
 
 export const cmdRtt = {
     record(ms: number, attrs: { cmd: string; scenario: string }): void {
-        cmdRttHist?.record(ms, attrs);
+        cmdRttHist?.record(ms, { ...attrs, run_id: runId });
     },
 };
 
 export const cmdErrorTotal = {
     add(attrs: { cmd: string; scenario: string; kind: string }): void {
-        cmdErrorHist?.add(1, attrs);
-        bumpMirror('bot_cmd_error_total', attrs, 1);
+        const a = { ...attrs, run_id: runId };
+        cmdErrorHist?.add(1, a);
+        bumpMirror('bot_cmd_error_total', a, 1);
     },
 };
 
 export const cmdSuccessTotal = {
     add(attrs: { cmd: string; scenario: string }): void {
-        cmdSuccessHist?.add(1, attrs);
-        bumpMirror('bot_cmd_success_total', attrs, 1);
+        const a = { ...attrs, run_id: runId };
+        cmdSuccessHist?.add(1, a);
+        bumpMirror('bot_cmd_success_total', a, 1);
     },
 };
 
 export const cycleSuccessTotal = {
     add(attrs: { scenario: string; op?: string }): void {
-        cycleSuccessHist?.add(1, attrs);
-        bumpMirror('bot_cycle_success_total', attrs as Record<string, string>, 1);
+        const a = { ...attrs, run_id: runId } as Record<string, string>;
+        cycleSuccessHist?.add(1, a);
+        bumpMirror('bot_cycle_success_total', a, 1);
     },
 };
 
 export const cycleFailureTotal = {
     add(attrs: { scenario: string; phase: string; op?: string }): void {
-        cycleFailureHist?.add(1, attrs);
-        bumpMirror('bot_cycle_failure_total', attrs as Record<string, string>, 1);
+        const a = { ...attrs, run_id: runId } as Record<string, string>;
+        cycleFailureHist?.add(1, a);
+        bumpMirror('bot_cycle_failure_total', a, 1);
     },
 };
 
 export const activeBots = {
-    inc(scenario: string): void { activeBotsGauge?.add(1, { scenario }); },
-    dec(scenario: string): void { activeBotsGauge?.add(-1, { scenario }); },
+    inc(scenario: string): void { activeBotsGauge?.add(1, { scenario, run_id: runId }); },
+    dec(scenario: string): void { activeBotsGauge?.add(-1, { scenario, run_id: runId }); },
 };
 
 export const roomsJoined = {
-    inc(scenario: string): void { roomsJoinedGauge?.add(1, { scenario }); },
-    dec(scenario: string): void { roomsJoinedGauge?.add(-1, { scenario }); },
+    inc(scenario: string): void { roomsJoinedGauge?.add(1, { scenario, run_id: runId }); },
+    dec(scenario: string): void { roomsJoinedGauge?.add(-1, { scenario, run_id: runId }); },
 };
 
 /** Classify a thrown error / disconnect into one of the kind labels. */

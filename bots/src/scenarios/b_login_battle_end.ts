@@ -4,7 +4,8 @@ import { Bot, DEFAULT_ENDPOINTS } from '../bot_login';
 import { runBattleSession, DEFAULT_SESSION } from '../bot_battle';
 import { runBotFleet } from '../bot_pool';
 import type { BotInnerLoop, BotOperation, OuterLoopOptions } from '../bot_runtime';
-import { startBotMetricsEndpoint, stopBotMetricsEndpoint, sumCounter } from '../otel_metrics_client';
+import { startBotMetrics, stopBotMetrics } from '../otel_metrics_client';
+import { queryFinalCounters } from '../prom_query';
 import { setupBotTracing, shutdownBotTracing } from '../otel_tracing_client';
 import { writeReport } from '../report';
 import { parseArgs, optNum, optStr, formatMs, hasFlag } from '../cli';
@@ -74,10 +75,10 @@ async function main(): Promise<void> {
         outerLoop: buildOuterLoop(params),
         onWorkerInit: () => {
             setupBotTracing({ serviceName: 'stress-bots' });
-            startBotMetricsEndpoint();
+            startBotMetrics();
         },
         onWorkerShutdown: async () => {
-            await stopBotMetricsEndpoint();
+            await stopBotMetrics();
             await shutdownBotTracing();
         },
         setupBot: async (globalIndex: number) => {
@@ -97,14 +98,18 @@ async function main(): Promise<void> {
     });
 
     const finishedAt = Date.now();
-    log.info({ durationMs: finishedAt - startedAt }, `${SCENARIO} finished, writing report`);
+    log.info({ durationMs: finishedAt - startedAt }, `${SCENARIO} finished, querying final counters from Prometheus`);
 
-    const cycles = sumCounter('bot_cycle_success_total');
-    const failures = sumCounter('bot_cycle_failure_total');
-    const totalCycles = cycles + failures;
-    const errorRate = totalCycles > 0 ? failures / totalCycles : 0;
+    const runId = process.env.STRESS_RUN_ID ?? `pid-${process.pid}`;
+    const stats = await queryFinalCounters({ scenario: SCENARIO, runId, startedAt, finishedAt });
 
-    const passed = errorRate < 0.01;
+    const passed = stats.ok ? (stats.cyclesTotal + stats.failuresTotal > 0
+        ? stats.failuresTotal / (stats.cyclesTotal + stats.failuresTotal) < 0.01
+        : false) : false;
+    const errorRate = stats.ok && (stats.cyclesTotal + stats.failuresTotal > 0)
+        ? stats.failuresTotal / (stats.cyclesTotal + stats.failuresTotal)
+        : 0;
+
     await writeReport({
         scenario: SCENARIO,
         startedAt,
@@ -112,27 +117,40 @@ async function main(): Promise<void> {
         params: params as unknown as Record<string, unknown>,
         verdict: {
             passed,
-            reason: passed
-                ? `bot 错误率 ${(errorRate * 100).toFixed(2)}% < 1% 阈值。详细 p99/QPS 请查看 Grafana dashboard 'dogsvr Overview'。`
-                : `bot 错误率 ${(errorRate * 100).toFixed(2)}% 超过 1% 阈值。检查 Grafana dashboard + dogsvr_txn_timeout_total 增量。`,
-            keyStats: {
+            reason: !stats.ok
+                ? `Prometheus 查询失败,verdict 不可判定 (inconclusive)。原因: ${stats.reason}。请查 Grafana dashboard 'dogsvr Overview' 人工判定。`
+                : passed
+                    ? `bot 错误率 ${(errorRate * 100).toFixed(2)}% < 1% 阈值。详细 p99/QPS 请查看 Grafana dashboard 'dogsvr Overview'。`
+                    : `bot 错误率 ${(errorRate * 100).toFixed(2)}% 超过 1% 阈值。检查 Grafana dashboard + dogsvr_txn_timeout_total 增量。`,
+            keyStats: stats.ok ? {
                 'concurrency': params.concurrency,
                 'duration': formatMs(params.durationMs),
                 'ramp': formatMs(params.rampMs),
                 'graceful_stop': formatMs(params.gracefulStopMs),
                 'syncType': params.syncType,
-                'cycles_total': totalCycles,
-                'cycles_success': cycles,
-                'cycles_failure': failures,
+                'cycles_total': stats.cyclesTotal + stats.failuresTotal,
+                'cycles_success': stats.cyclesTotal,
+                'cycles_failure': stats.failuresTotal,
                 'error_rate': `${(errorRate * 100).toFixed(2)}%`,
+                'rtt_p50_ms': stats.rttP50?.toFixed(2) ?? 'n/a',
+                'rtt_p95_ms': stats.rttP95?.toFixed(2) ?? 'n/a',
+                'rtt_p99_ms': stats.rttP99?.toFixed(2) ?? 'n/a',
+                'active_peak': stats.activePeak ?? 'n/a',
+                'cycles_by_op': JSON.stringify(stats.cyclesByOp),
+                'failures_by_phase': JSON.stringify(stats.failuresByPhase),
                 'relogin_every_cycles': params.reloginEveryCycles || '-',
                 'relogin_every_ms': params.reloginEveryMs ? formatMs(params.reloginEveryMs) : '-',
+            } : {
+                'concurrency': params.concurrency,
+                'duration': formatMs(params.durationMs),
+                'cycles_total': 'n/a (prom query failed)',
+                'error_rate': 'n/a',
             },
         },
         notes: [
-            `查看 Grafana panels:\n  - dogsvr_cmd_duration_ms{cmdId="ZONE_LOGIN"} p99/QPS\n  - mongo_op_duration_ms{coll="role_coll"}\n  - redis_op_duration_ms{op="set"} (锁获取)`,
+            `查看 Grafana panels:\n  - dogsvr_cmd_duration_milliseconds{cmdId="ZONE_LOGIN"} p99/QPS\n  - mongo_op_duration_milliseconds{coll="role_coll"}\n  - redis_op_duration_milliseconds{op="set"} (锁获取)`,
             `场景 B 是 C 和 D 的基线,如果这里就异常,先修复再跑 C/D。`,
-            `cluster 模式 (concurrency > 500) 下 cycles_total 始终为 0,以 Grafana 为准。`,
+            `cycles/failures 来自 Prometheus instant query (run_id=${runId},OTLP push interval 5s,允许 ±5s 计数尾差);RTT 分位见 keyStats / Grafana。`,
         ],
     });
 }

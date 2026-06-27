@@ -19,10 +19,9 @@ Four pieces sit side-by-side under this repo, each independently usable:
 - `ghz/` — gRPC stress configs targeting battlesvr / zonesvr inner endpoints.
 - `k6/` — HTTP-side load (`dir/Common`-routed tsrpc-over-HTTP).
 - `observability/` — `grafana/otel-lgtm` single-container backend (Loki +
-  Grafana + Tempo + Prometheus + OTel Collector). Holds `prometheus.yml`,
-  Grafana dashboards, and the dashboard provider yml — all mounted into the
-  container. Scrapes dir/zonesvr/battlesvr main + worker `/metrics` plus the
-  bots' `:9201`, and receives OTLP traces/logs on `:4317`/`:4318`.
+  Grafana + Tempo + Prometheus + OTel Collector). Holds Grafana dashboards
+  and the dashboard provider yml — mounted into the container. Receives all
+  three signals (metrics + traces + logs) via OTLP push on `:4317`/`:4318`.
 
 `RUNBOOK.md` (top-level) is the end-to-end manual recipe — start servers, fill
 seed data, run scenarios, collect reports. Each subdirectory has its own

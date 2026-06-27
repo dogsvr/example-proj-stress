@@ -15,15 +15,15 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(colyseus_tick_duration_ms_bucket[30s])) by (le, roomType))",
+          "expr": "histogram_quantile(0.50, sum(rate(colyseus_tick_duration_milliseconds_bucket[30s])) by (le, roomType))",
           "legendFormat": "p50/{{roomType}}", "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(colyseus_tick_duration_ms_bucket[30s])) by (le, roomType))",
+          "expr": "histogram_quantile(0.95, sum(rate(colyseus_tick_duration_milliseconds_bucket[30s])) by (le, roomType))",
           "legendFormat": "p95/{{roomType}}", "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(colyseus_tick_duration_ms_bucket[30s])) by (le, roomType))",
+          "expr": "histogram_quantile(0.99, sum(rate(colyseus_tick_duration_milliseconds_bucket[30s])) by (le, roomType))",
           "legendFormat": "p99/{{roomType}}", "refId": "C"
         },
         {

@@ -4,7 +4,7 @@
 import { Bot, DEFAULT_ENDPOINTS } from '../bot_login';
 import { runBattleSession, DEFAULT_SESSION } from '../bot_battle';
 import { runPool } from '../bot_pool';
-import { startBotMetricsEndpoint, stopBotMetricsEndpoint, sumCounter } from '../otel_metrics_client';
+import { startBotMetrics, stopBotMetrics, sumCounter } from '../otel_metrics_client';
 import { setupBotTracing, shutdownBotTracing } from '../otel_tracing_client';
 import { writeReport } from '../report';
 import { parseArgs, optNum, optStr, formatMs } from '../cli';
@@ -43,7 +43,7 @@ async function main(): Promise<void> {
     const params = readParams();
     log.info({ params }, `${SCENARIO} starting (one iteration)`);
     setupBotTracing({ serviceName: 'stress-bots' });
-    startBotMetricsEndpoint();
+    startBotMetrics();
     const startedAt = Date.now();
 
     await runPool({
@@ -102,7 +102,7 @@ async function main(): Promise<void> {
         ],
     });
 
-    await stopBotMetricsEndpoint();
+    await stopBotMetrics();
     await shutdownBotTracing();
 }
 

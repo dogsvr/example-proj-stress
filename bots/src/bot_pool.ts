@@ -2,6 +2,7 @@
 
 import * as cluster from 'node:cluster';
 import * as os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { activeBots, cycleSuccessTotal, cycleFailureTotal, classifyError } from './otel_metrics_client';
 import { driveBot, type BotInnerLoop, type OuterLoopOptions } from './bot_runtime';
 import type { Bot } from './bot_login';
@@ -9,6 +10,14 @@ import { log } from './log';
 
 export const IN_PROCESS_LIMIT = 500;
 export const CLUSTER_HARD_LIMIT = 2000;
+
+/** Generate STRESS_RUN_ID once in the primary; child processes inherit via env. */
+function ensureRunId(): string {
+    if (!process.env.STRESS_RUN_ID) {
+        process.env.STRESS_RUN_ID = randomUUID();
+    }
+    return process.env.STRESS_RUN_ID;
+}
 
 export type BotCycle = (botIndex: number) => Promise<void>;
 
@@ -61,6 +70,7 @@ export async function runInProcess(opts: PoolOptions): Promise<void> {
 export async function runWithCluster(opts: PoolOptions): Promise<void> {
     const c = cluster as unknown as typeof import('node:cluster').default;
     if (c.isPrimary) {
+        ensureRunId();
         const numChildren = Math.max(1, Math.floor(os.cpus().length / 2));
         const perChild = Math.ceil(opts.concurrency / numChildren);
         log.info({ scenario: opts.scenario, numChildren, perChild, total: opts.concurrency }, 'cluster master starting children');
@@ -73,7 +83,6 @@ export async function runWithCluster(opts: PoolOptions): Promise<void> {
                 STRESS_CHILD_CONCURRENCY: String(Math.min(perChild, opts.concurrency - i * perChild)),
                 STRESS_CHILD_DURATION_MS: String(opts.durationMs),
                 STRESS_CHILD_RAMP_MS: String(opts.rampMs ?? 0),
-                STRESS_BOTS_PORT: '0',
             };
             children.push(c.fork(env));
         }
@@ -159,15 +168,16 @@ export async function runBotFleet<B extends Bot>(opts: BotFleetOptions<B>): Prom
     const c = cluster as unknown as typeof import('node:cluster').default;
 
     if (opts.concurrency <= IN_PROCESS_LIMIT) {
+        ensureRunId();
         await runFleetWorker(opts, 0, opts.concurrency, opts.rampMs ?? 0, opts.durationMs);
         return;
     }
 
     if (c.isPrimary) {
+        ensureRunId();
         const numChildren = Math.max(1, Math.floor(os.cpus().length / 2));
         const perChild = Math.ceil(opts.concurrency / numChildren);
         log.info({ scenario: opts.scenario, numChildren, perChild, total: opts.concurrency }, 'fleet primary: forking workers');
-        log.warn({ scenario: opts.scenario }, 'cluster mode: counterMirror is per-process; primary writeReport will read 0 cycles');
 
         const children: ReturnType<typeof c.fork>[] = [];
         for (let i = 0; i < numChildren; i++) {
@@ -178,7 +188,6 @@ export async function runBotFleet<B extends Bot>(opts: BotFleetOptions<B>): Prom
                 STRESS_CHILD_CONCURRENCY: String(Math.min(perChild, opts.concurrency - i * perChild)),
                 STRESS_CHILD_DURATION_MS: String(opts.durationMs),
                 STRESS_CHILD_RAMP_MS: String(opts.rampMs ?? 0),
-                STRESS_BOTS_PORT: '0',
                 STRESS_FLEET_WORKER: '1',
             };
             children.push(c.fork(env));

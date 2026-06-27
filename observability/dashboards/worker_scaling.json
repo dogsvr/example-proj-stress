@@ -26,7 +26,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{
-        "expr": "sum(rate(dogsvr_cmd_duration_ms_count{svr=\"zonesvr\"}[1m]))",
+        "expr": "sum(rate(dogsvr_cmd_duration_milliseconds_count{svr=\"zonesvr\"}[1m]))",
         "legendFormat": "zonesvr total QPS", "refId": "A"
       }],
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
@@ -38,7 +38,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{
-        "expr": "histogram_quantile(0.99, sum(rate(dogsvr_cmd_duration_ms_bucket{svr=\"zonesvr\"}[1m])) by (le, cmdId))",
+        "expr": "histogram_quantile(0.99, sum(rate(dogsvr_cmd_duration_milliseconds_bucket{svr=\"zonesvr\"}[1m])) by (le, cmdId))",
         "legendFormat": "{{cmdId}}", "refId": "A"
       }],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
@@ -63,7 +63,7 @@
       "gridPos": { "h": 6, "w": 12, "x": 12, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{
-        "expr": "rate(process_cpu_seconds_total{svr=\"zonesvr\"}[1m])",
+        "expr": "rate(process_cpu_time_seconds_total{svr=\"zonesvr\"}[1m])",
         "legendFormat": "{{role}}", "refId": "A"
       }]
     }

@@ -3,15 +3,14 @@
 单机 Linux 环境下跑 dogsvr-org 压测场景的端到端操作手册。OTLP 三信号
 (metrics + traces + logs)backend 用 `grafana/otel-lgtm` 单容器
 (LGTMP all-in-one:Loki + Grafana + Tempo + Prometheus + OTel Collector)。
-云上部署不在范围,见末尾 [Production Notes](#production-notes云上简要)。
+云上部署不在范围,见末尾 Production Notes。
 
 ## 约定
 
 - 命令默认在 `example-proj-stress` 仓根执行,先 `cd <polyrepo-root>/example-proj-stress`
 - 跨仓引用用 `../<sibling>` 形式(例如 `../example-proj`、`../dogsvr`)
 - macOS / Windows Docker Desktop 把下文 `--network=host` 替换为
-  `--add-host=host.docker.internal:host-gateway`,并把 `prometheus.yml` 里的
-  `127.0.0.1:91xx` 改为 `host.docker.internal:91xx`(本文不展开)
+  `--add-host=host.docker.internal:host-gateway`(本文不展开)
 
 ## 前置检查清单
 
@@ -46,13 +45,8 @@ docker version >/dev/null && echo "docker OK"
 docker images grafana/otel-lgtm --format '{{.Repository}}:{{.Tag}}' | grep -q otel-lgtm \
     || docker pull grafana/otel-lgtm:latest
 
-# 8. 端口未被占用
-#    业务: 9101-9103 main + 9112/9113/9123/9124/9133 worker + 9201 bots
-#      (zonesvr/battlesvr 走 central log mode 占 threadId=1,业务 worker 端口比直觉值高 1,
-#       详见后文 §Troubleshooting)
-#    观测栈: 3000 grafana / 9090 prometheus / 4317 OTLP gRPC / 4318 OTLP HTTP
-#            / 3100 loki / 3200 tempo
-ss -tln | grep -E ':(3000|3100|3200|4317|4318|9090|9101|9102|9103|9112|9113|9123|9124|9133|9201)\b' \
+# 8. 端口未被占用 (业务进程 OTLP push 模式不再 listen 9101-9133;只看观测栈端口)
+ss -tln | grep -E ':(3000|3100|3200|4317|4318|9090)\b' \
     && echo "WARN: 有端口已占用"
 ```
 
@@ -62,64 +56,15 @@ ss -tln | grep -E ':(3000|3100|3200|4317|4318|9090|9101|9102|9103|9112|9113|9123
 
 ## 启动顺序
 
-按依赖关系,**一次跑通的最小路径**:
+按依赖关系,**一次跑通的最小路径**(观测栈先起,业务进程的 OTLP push 才有去处):
 
-### 1. 启动 example-proj 三进程
+### 1. 启动观测栈(单容器 LGTMP + OTel Collector)
 
-```sh
-cd ../example-proj
-pm2 start ecosystem.config.js
-pm2 ls
-```
-
-预期:`exp-dir` `exp-zonesvr` `exp-battlesvr` 三个 online。
-
-### 2. 验证 /metrics 都活着
-
-每个业务进程(主线程 + 各 worker 线程)由 `@opentelemetry/exporter-prometheus`
-内置 HTTP server 暴露 `/metrics`,供 Prometheus 容器拉取。这一步在启动观测栈
-之前**先 fail-fast 验证业务侧暴露正常**,把"业务 metrics 注册"和"observability
-容器 scrape"两类故障隔开。
-
-端口模型:主线程 9101/9102/9103;worker `portBase + threadId`(进程内全局递增,**不跳过框架内部 Worker**)。`@dogsvr/logger` central log mode 会先 fork 一个独立日志 Worker 占 threadId=1,业务 worker 整体顺延 1 位。本项目实测端口:
-
-| 进程 | log mode | 主线程 | 业务 worker 监听 |
-|---|---|---|---|
-| dir | inline | 9101 | 9112, 9113 (threadId=1,2) |
-| zonesvr | central | 9102 | **9123, 9124** (threadId=2,3) |
-| battlesvr | central | 9103 | **9133** (threadId=2) |
-
-详见 §Troubleshooting "Known issue: central log mode shifts worker /metrics ports"。
+在 `example-proj-stress` 仓根:
 
 ```sh
-# 主线程
-curl -sf http://127.0.0.1:9101/metrics | grep -c '^dogsvr_'   # > 0
-curl -sf http://127.0.0.1:9102/metrics | grep -c '^dogsvr_'   # > 0
-curl -sf http://127.0.0.1:9103/metrics | grep -c '^dogsvr_'   # > 0
-
-# worker 线程
-curl -sf http://127.0.0.1:9112/metrics | head -3   # dir worker (threadId=1)
-curl -sf http://127.0.0.1:9113/metrics | head -3   # dir worker (threadId=2)
-curl -sf http://127.0.0.1:9123/metrics | head -3   # zonesvr worker (threadId=2)
-curl -sf http://127.0.0.1:9124/metrics | head -3   # zonesvr worker (threadId=3)
-curl -sf http://127.0.0.1:9133/metrics | head -3   # battlesvr worker (threadId=2)
-```
-
-任一 endpoint 返回不了 → `pm2 logs <name>` 看启动错误。
-
-### 3. 启动观测栈(单容器 LGTMP + OTel Collector)
-
-回到 `example-proj-stress` 仓根:
-
-```sh
-# 拉起 grafana/otel-lgtm 容器 (LGTMP all-in-one)
-#   --network=host: Linux 单机最简,容器可直接 scrape 127.0.0.1:91xx
-#   prometheus.yml         : 复用 scrape 配置 (端口模型 1:1 不变)
-#   dashboards/            : 3 份 metrics dashboard 的 JSON
-#   dashboards-provider.yaml: Grafana provisioning 的 provider 定义
 docker run -d --name otel-lgtm \
     --network=host \
-    -v $(pwd)/observability/prometheus.yml:/otel-lgtm/prometheus.yaml:ro \
     -v $(pwd)/observability/dashboards:/otel-lgtm/grafana/conf/provisioning/dashboards/custom:ro \
     -v $(pwd)/observability/dashboards-provider.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml:ro \
     grafana/otel-lgtm:latest
@@ -134,14 +79,39 @@ curl -sf http://127.0.0.1:9090/-/healthy && echo "prom OK"
 curl -sf http://127.0.0.1:3000/api/health && echo "grafana OK"
 curl -sf http://127.0.0.1:3200/ready      && echo "tempo OK"
 curl -sf http://127.0.0.1:3100/ready      && echo "loki OK"
-
-# 浏览器打开 (匿名 Viewer 已配置)
-#   http://127.0.0.1:9090/targets         所有 7 个 job 应 UP
-#   http://127.0.0.1:3000/dashboards      "dogsvr stress" 文件夹 metrics dashboard
-#   http://127.0.0.1:3000/explore         切 Tempo / Loki datasource 看 traces / logs
 ```
 
-Grafana 默认账号 `admin/admin`(只在编辑 dashboard 时需要)。
+浏览器进 `http://127.0.0.1:3000/dashboards` 看 "dogsvr stress" 文件夹;
+`/explore` 切 Tempo / Loki datasource 看 traces / logs。Grafana 默认账号
+`admin/admin`(只在编辑 dashboard 时需要)。
+
+### 2. 启动 example-proj 三进程
+
+```sh
+cd ../example-proj
+pm2 start ecosystem.config.js
+pm2 ls
+```
+
+预期:`exp-dir` `exp-zonesvr` `exp-battlesvr` 三个 online。
+
+### 3. 验证 OTLP push 通路
+
+业务侧通过 `@opentelemetry/exporter-metrics-otlp-http` push 到容器内 OTel
+Collector(`http://127.0.0.1:4318/v1/metrics`),collector 转发到 Prometheus
+的 OTLP receiver。等 ~10s 让首次 push 落 prom,然后:
+
+```sh
+# OTLP HTTP endpoint 通(POST 没 body 应返回 415,而不是 ECONNREFUSED)
+curl -sf -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:4318/v1/metrics
+#   预期: 415
+
+# 业务侧指标已经入 prom
+curl -s 'http://127.0.0.1:9090/api/v1/query?query=dogsvr_cmd_duration_milliseconds_count' \
+    | grep -q '"status":"success"' && echo "metrics OK"
+```
+
+失败 → `pm2 logs <name>` 或 `docker logs otel-lgtm`。
 
 ### 4. 数据预填(只需一次)
 
@@ -203,12 +173,10 @@ bot 跑的同时打开浏览器看 Grafana,**三信号都要看到**:
 
 跑完检查:
 ```sh
-ls reports/
-#   应该有一个 <时间戳>-b_login_battle_end/ 目录
 cat reports/*-b_login_battle_end/summary.md
 ```
 
-如果烟雾测试没问题 → 继续大规模。如果报错 → 看下面的 Troubleshooting。
+通过 → 继续大规模 / 其他场景。报错 → 见 Troubleshooting。
 
 ### 场景 A: Colyseus 房间承载上限
 
@@ -221,7 +189,7 @@ node dist/scenarios/a_room_capacity.js \
 ```
 
 观察点(Grafana `Colyseus Battle` dashboard):
-- `colyseus_tick_duration_ms` p99 何时跨过红线 16.67ms
+- `colyseus_tick_duration_milliseconds` p99 何时跨过红线 16.67ms
 - 跨过时 `colyseus_room_count` 是多少 → **房间承载上限**
 - battlesvr `nodejs_eventloop_lag_seconds` 何时超过 100ms
 
@@ -244,7 +212,7 @@ node dist/scenarios/b_login_battle_end.js \
 
 **关停语义**:`duration` 到达后**只是不启新 cycle**,已经在跑的 cycle 自然完成或在 `graceful-stop-ms` 后被强制 abort。Ctrl+C(SIGINT/SIGTERM)立即触发 hard abort,**第二次 Ctrl+C 强退**(exit code 130)。
 
-**Cluster 模式 (concurrency > 500) 报告失真**:bot 进程 `counterMirror` 是 per-process Map,`runBotFleet` primary 进程不参与计数,`summary.md` 里 `cycles_total` 始终为 0;以 Grafana / Prometheus 为准。≤ 500 单进程模式不受影响。
+**Cluster 模式 (concurrency > 500)**:`writeReport` 走 Prometheus instant query 而不是进程内 mirror,详见 §"bot 端指标的准确性边界"。
 
 跑完后粗略看下已知噪声量级(详见 §"已知噪声: bot stderr refId not found"):
 
@@ -253,9 +221,9 @@ echo "refId not found:        $(grep -c '\"refId\" not found' /tmp/stress-b-stde
 ```
 
 观察点(Grafana `dogsvr Overview` dashboard):
-- `dogsvr_cmd_duration_ms{cmdId="ZONE_LOGIN"}` p99 → ZONE_LOGIN 延迟
-- `mongo_op_duration_ms{coll="role_coll"}` p99 → Mongo 写延迟
-- `redis_op_duration_ms{op="set"}` → Redis 锁获取延迟
+- `dogsvr_cmd_duration_milliseconds{cmdId="ZONE_LOGIN"}` p99 → ZONE_LOGIN 延迟
+- `mongo_op_duration_milliseconds{coll="role_coll"}` p99 → Mongo 写延迟
+- `redis_op_duration_milliseconds{op="set"}` → Redis 锁获取延迟
 
 ### 场景 C: workerThreadNum 扩展曲线
 
@@ -295,30 +263,39 @@ bash bots/src/scenarios/d_hot_update.sh
 
 每个场景跑完产出 `reports/<YYYYMMDD-HHMM>-<场景>/`(在 `example-proj-stress` 仓根):
 
-| 文件 | 内容 | 备注 |
-|---|---|---|
-| `summary.md` | 中文摘要,通过/未通过结论 | 自动生成,数据源是 bot 进程内 mirror,不依赖 prom |
-| `metrics.json` | bot 端 OTel sync counter snapshot | 自动,**只 mirror Counter**,Histogram / UpDownCounter 不在内 |
-| `system.log` | top + free + uname 快照 | 自动 |
-| `git_revisions.txt` | 各仓库 commit + dirty 标记 | 自动 |
-| `grafana_*.png` | dashboard 截图 | 浏览器手动截 |
+| 文件 | 内容 |
+|---|---|
+| `summary.md` | 中文摘要,通过/未通过结论 |
+| `metrics.json` | bot 端 OTel sync counter snapshot(只 mirror Counter,scenario B cluster 下为空) |
+| `system.log` | top + free + uname 快照 |
+| `git_revisions.txt` | 各仓库 commit + dirty 标记 |
+| `grafana_*.png` | dashboard 截图(浏览器手动截) |
 
 ### bot 端指标的准确性边界
 
-bot 进程 metrics 走 PrometheusExporter pull (9201) + prom 5s scrape。短命进程头尾各 ≤ 5s 漏帧。
+bot 进程 metrics 通过 OTLP push 到 4318。SDK 在 `provider.shutdown()` 时
+flush pending metrics,进程退出前最后一帧不丢。
 
-**进程内 mirror 是准的,prom 侧首尾不可信:**
-- `summary.md` / `metrics.json` 的 cycle 计数 / verdict 来自 `counterMirror` (`bots/src/otel_metrics_client.ts`),与 cmd 调用同步累加,不依赖 prom scrape,**不丢**。但 mirror 只覆盖 Counter,Histogram (`bot_cmd_rtt_ms`) 和 UpDownCounter (`bot_active_count` / `bot_rooms_joined`) 不在内。
-- Grafana 上 bot 指标的曲线**首末各 ≤ 5s 不可信**:首次 scrape 之前的增量 rate() 起跳延迟,末次 scrape 到进程退出之间的增量永久丢。短场景 (< 30s) 漏帧占比可达双位数。
-- 进程总寿命 < 5s 时 prom 一帧没拿到,Grafana 上"这次场景没数据"。
-- 多档串跑(场景 C):每档 bot 退出 → counter reset → prom 看到 rate=0 断点,各档 `summary.md` 不受影响。
+**verdict 数据源按场景模式分**:
 
-**实务**:
-- 看 cycle 总数 / QPS / 错误率 → **以 `summary.md` 为准**,但注意 cluster 模式 (>500) 下 primary 看到 0,见 §"场景 B"。
-- 看延迟 p99 / 分位 → Grafana `bot_cmd_rtt_ms`,只在 bot 持续运行期间看实时图。
-- Histogram 桶上限 10s,>10s 的 outlier 落 `+Inf`,无法精确还原。
+- **A/C/D 三个 scenario,以及 B 在 ≤ 500 并发下走 in-process**:`summary.md` 的
+  cycle 计数 / verdict 来自进程内 `counterMirror`,与 cmd 调用同步累加,
+  **不丢**。但 mirror 只覆盖 Counter,Histogram (`bot_cmd_rtt_milliseconds`)
+  和 UpDownCounter (`bot_active_count` / `bot_rooms_joined`) 不在内,
+  分位和实时活跃度看 Grafana。
+- **Scenario B 在 > 500 并发下走 cluster fork**:primary 进程不参与 cmd
+  调用,mirror 永远是空。`writeReport` 改查 Prometheus instant query
+  (`bots/src/prom_query.ts`),按 `run_id` instrument attribute 隔离
+  多次跑(从 `STRESS_RUN_ID` env 读,fork 时由 primary 注入)。primary 在
+  `runBotFleet` 返回后 sleep 2s 让 final-flush 落 prom head,再 instant
+  query,最多重试 6 次。允许 ±5s 计数尾差(OTLP push interval 5s)。
+  Prom 查询失败 → verdict 标为 inconclusive (`passed=false`),
+  不 fallback 到空 mirror。
 
-(根治路径:bot metrics 切 OTLP push 到 4318,`provider.shutdown()` 强制 flush 头尾不丢;及 cluster primary 用 IPC 合并各 worker mirror。两条均尚未落地。)
+**其他边界**(与传输模式无关):
+- Histogram 桶上限 10s,>10s outlier 落 `+Inf`,无法精确还原。
+- 多档串跑(场景 C):每档 bot 退出 → counter reset → prom rate=0 断点,
+  各档 `summary.md` 不受影响(各自走进程内 mirror)。
 
 ---
 
@@ -338,50 +315,21 @@ Please report this issue to the developers.
 **处理**:跑命令统一 `2> /tmp/stress-<场景>-stderr.log` 把噪声从终端隔离,跑完用 `grep -c` 计数核对。verdict **不计入 refId**:`error_rate` 只看 cycle 整体 throw/不 throw,refId 不抛 → 计入 cycle success(故意如此,压测 server 容量不被 bot 解码 bug 干扰)。
 
 **边界(后续扩展场景务必读)**:
-- stderr refId 数量高 ≠ 服务端坏。服务端健康看 `dogsvr_cmd_duration_ms` / `mongo_op_duration_ms` / `dogsvr_txn_timeout_total`。
+- stderr refId 数量高 ≠ 服务端坏。服务端健康看 `dogsvr_cmd_duration_milliseconds` / `mongo_op_duration_milliseconds` / `dogsvr_txn_timeout_total`。
 - bot 端任何依赖 state 解码的断言都不可信。当前 verdict 只看 cycle 成败 + cmd RTT + WS 通断,不读 room state,所以安全。**未来若加 "bot 校验 server state" 类断言**,decoder 漏帧会让断言假阳/假阴,必须改走多进程隔离(`bot_pool.ts` `IN_PROCESS_LIMIT=1` 强制 1 bot 1 进程,代价每 bot ~60-80MB RAM)或不在 bot 侧做 state 断言。
 - 不要写代码层 filter(`console.error/warn` monkey-patch 易漏新 SDK 路径,曾尝试已回退)。
 - refId 计数若反常上涨(如 100 并发突然涨到原来 10×),触发器画像变了,别忽视。
 
-### `/metrics` 返回 404 或连接拒绝
+### Prom 查不到业务 metrics(`dogsvr_*` 全空)
 
-1. `pm2 logs exp-zonesvr` 看启动是否报错
+1. `pm2 logs exp-zonesvr` 看启动是否报错(OTLP exporter init / connection refused 会打印)
 2. 配置块 `otel.metrics.enabled` 是否为 true:
    ```sh
    grep -A1 'otel' ../example-proj/dist/zonesvr/main_thread_config.json
    ```
 3. otel metrics 是否被 import 进 entry: `grep -c otel_metrics ../example-proj/dist/zonesvr/zonesvr.js` 应为 1
-4. 端口冲突 `ss -tln | grep 9102`
-
-### Known issue: central log mode shifts worker /metrics ports
-
-**症状**:`prometheus.yml` 里 zonesvr-worker / battlesvr-worker 的 target 全部 DOWN,但
-对应业务进程 pm2 status 是 online、main 进程 /metrics(9102/9103)正常。
-
-**根因**:worker /metrics 端口 = `portBase + node:worker_threads.threadId`(见
-`example-proj/src/shared/otel.ts:73`)。`threadId` 在**进程内全局递增**,且
-**任何**通过 `new Worker()` 创建的线程都会消耗一个值,**包括框架内部的 Worker**。
-
-`@dogsvr/logger` 在 `mode: "central"` 下会先 `new Worker(central_isolate_entry.js)`
-启动一个独立的中央日志 Worker(`logger/dist/common/strategies/central_main.js:52`),
-它占走 threadId=1,业务 worker 整体顺延 1 位:
-
-| 进程 | log mode | portBase | 业务 worker threadId | 实际监听 |
-|---|---|---|---|---|
-| dir | inline | 9111 | 1, 2 | 9112, 9113 |
-| zonesvr | **central** | 9121 | **2, 3** | **9123, 9124** |
-| battlesvr | **central** | 9131 | **2** | **9133** |
-
-`prometheus.yml` 已按上面的实际监听端口写死,所以**默认是工作的**。如果之后切换 dir 到
-central(或反过来),记得同步 `prometheus.yml` 的 target 列表。
-
-**热更新还有第二层副作用**:hot update 不重启进程,新 worker 在同一进程内 `new Worker()`,
-threadId 继续递增不回收。`pm2 trigger exp-zonesvr hotUpdate` 后第一次新 worker 拿
-threadId=4/5(zonesvr),已经超出 `prometheus.yml` 的 target 列表 → 替换的 worker 永远
-scrape 不到。pm2 restart 后新进程 threadId 重新计数才恢复。压测期间不会反复 hot update,
-影响 limited;长跑场景下 hot update 越多,死 target 越多。
-
-**当前 workaround**:`prometheus.yml` 写死匹配现状的端口(9123/9124、9133),并接受 hot update 后 worker scrape 暂时失效——见 §"场景 D: 热更新鲁棒性"的预期行为。根治方向尚未落地(业务侧改用槽位编号 / SD;工程量 + rolling restart EADDRINUSE 取舍未定),在落地前请勿调整文档/scrape config 的端口。
+4. OTLP HTTP endpoint 通不通:`curl -X POST http://127.0.0.1:4318/v1/metrics` 应返回 415,而不是 ECONNREFUSED
+5. Prometheus 是否启用了 OTLP receiver:`ps -ef | grep prometheus | grep -v grep`,启动行应含 `--web.enable-otlp-receiver`
 
 ### bot 报 `tsrpc connect failed` / `ECONNREFUSED`
 
@@ -393,12 +341,20 @@ scrape 不到。pm2 restart 后新进程 threadId 重新计数才恢复。压测
 
 ### bot 程序到了 `--duration` 还不结束
 
-预期行为 = `duration` 之后 ≤ `graceful-stop-ms`(默认 15s)拖尾,让 in-flight cycle 自然完成。stderr 看到 `[Colyseus reconnection]: Re-establishing ...` 字样说明踩到 SDK 自动重连(已在 `bot_battle.ts` 关掉,正常 cycle 不会再触发);若仍出现,说明 abort 时机命中 `joinOrCreate` 回调窗口,对应处理在 `bot_battle.ts` 已加 orphan-room 清理。Ctrl+C 一次仍不退 → 第二次 Ctrl+C 强退 (exit code 130)。
+预期 = `duration` 之后 ≤ `graceful-stop-ms`(默认 15s)拖尾,让 in-flight cycle 自然完成。stderr 看到 `[Colyseus reconnection]: Re-establishing ...` 说明踩到 SDK 自动重连窗口(`bot_battle.ts` 已加 orphan-room 清理)。Ctrl+C 一次仍不退 → 第二次 Ctrl+C 强退(exit code 130)。
+
+### scenario B verdict=inconclusive(`Prom 查询失败`)
+
+Cluster 模式下 `summary.md` 显示 verdict=inconclusive、`reason` 提到 Prometheus 查询失败 → primary 拿不到 worker 的 cycle 计数。按顺序:
+
+1. 跑期间 prom 是否能查到 cycle:`curl -s 'http://127.0.0.1:9090/api/v1/query?query=sum(bot_cycle_success_total)' | head -c 300`,空 → bot 端 OTLP push 没通,先排 §"Prom 查不到业务 metrics"
+2. `run_id` label 是否存在:`curl -s 'http://127.0.0.1:9090/api/v1/series?match\[\]=bot_cycle_success_total' | head -c 500`,应能看到 `run_id="..."`;无 → bot SDK resource attribute 没生效
+3. Prom 查询时机太早 — `prom_query.ts` 已在 `runBotFleet` 返回后 sleep 2s + 重试 6×1s,但若 collector pipeline 异常堆积可能要更久;`docker logs otel-lgtm | grep -i drop` 看是否 collector 在丢数据
 
 ### Grafana dashboard 全是 "No data"
 
-- 看 prom targets 页面,有没有 DOWN 的:`http://127.0.0.1:9090/targets`
-- 看 prom 是否能查到指标:`curl 'http://127.0.0.1:9090/api/v1/query?query=dogsvr_cmd_duration_ms_count'`
+- prom 是否收到任何 OTLP 数据:`curl 'http://127.0.0.1:9090/api/v1/query?query=dogsvr_cmd_duration_milliseconds_count'`,`status: success` 且 `result` 非空 = 业务侧 push 通的;空 → push 没进来,见上面 "Prom 查不到业务 metrics"
+- 验证指标名没有 `_milliseconds` / `_bytes` / `_seconds` 后缀漂移:`curl -s 'http://127.0.0.1:9090/api/v1/label/__name__/values' | grep dogsvr` 应该看到 `dogsvr_cmd_duration_milliseconds_*`,**不应出现** `dogsvr_cmd_duration_ms_*`(老命名)或 `dogsvr_cmd_duration_milliseconds_total_total`(双后缀);若漂移,见 §"Naming" (`observability/README.md`)
 - Grafana 数据源 UID 写死为 `prometheus`,如果你手动重建过数据源会变 UID,改 dashboard JSON 或重启 grafana 让 provisioning 复盘
 - Tempo / Loki 看不到数据,走下面 "Tempo 里搜不到 trace" / "Loki 里搜不到 log"
 
@@ -474,11 +430,15 @@ Mongo / Redis 不要停(常驻服务)。
 | 仅 mongo timing | `src/<svr>/worker_thread_config.json` | `otel.metrics.mongo.enabled = false` | `pm2 restart exp-<svr>`(worker hot update 也行) |
 | 高 QPS 时 mongo 采样 | 同上 | `otel.metrics.mongo.samplingRate = 0.1` | 同上 |
 | Colyseus tick 计时 | `src/battlesvr/worker_thread_config.json` | `otel.metrics.colyseus.tickDuration = false` | `pm2 restart exp-battlesvr` |
-| OTLP trace export(进程级旁路) | 进程环境变量(pm2 ecosystem 的 `env`) | `OTEL_TRACES_EXPORTER=none` | `pm2 restart exp-<svr>` |
-| OTLP logs export(进程级旁路) | 同上 | `OTEL_LOGS_EXPORTER=none` | `pm2 restart exp-<svr>` |
-| OTel 全部信号(bot 端) | bot 进程环境变量 | `OTEL_SDK_DISABLED=true` | 直接 kill bot 重跑 |
+| 业务侧 OTLP metrics endpoint | 进程环境变量(pm2 ecosystem 的 `env`) | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://...` | `pm2 restart exp-<svr>` |
+| 通用 OTLP endpoint(traces / metrics / logs 共用) | 同上 | `OTEL_EXPORTER_OTLP_ENDPOINT=http://...` | 同上 |
+| OTLP trace export(进程级旁路) | 同上 | `OTEL_TRACES_EXPORTER=none` | 同上 |
+| OTLP logs export(进程级旁路) | 同上 | `OTEL_LOGS_EXPORTER=none` | 同上 |
+| bot OTLP metrics endpoint | bot 进程环境变量 | `STRESS_BOTS_OTLP_ENDPOINT=http://...` | 直接 kill bot 重跑 |
+| bot run_id(scenario B prom 查询用) | bot 进程环境变量(可省,默认 uuid) | `STRESS_RUN_ID=<id>` | 同上 |
+| OTel 全部信号(bot 端) | bot 进程环境变量 | `OTEL_SDK_DISABLED=true` | 同上 |
 
-注意:**dist 下的 JSON 是 build 拷贝过去的**,生效顺序:改 `src/`,跑 `npm run build`(其实只需要 copyfiles 步骤),再 restart。或者直接改 `dist/<svr>/<config>.json` 现场改 + restart,但下次 build 会被覆盖。
+注意:**dist 下的 JSON 是 build 拷贝过去的**。改 `src/` 后跑 `npm run build` 再 restart;急用直接改 `dist/<svr>/<config>.json` + restart,但下次 build 会被覆盖。
 
 ---
 
@@ -498,6 +458,10 @@ Mongo / Redis 不要停(常驻服务)。
 5. **采样率** — 生产场景 trace 100% 采样会爆,用 head sampling
    (`OTEL_TRACES_SAMPLER=parentbased_traceidratio` + `OTEL_TRACES_SAMPLER_ARG=0.01`),
    或在 OTel Collector 做 tail sampling(按 latency / error 留样)。
+6. **指标命名遵循 OTel 规范**(SDK 不带物理单位后缀 + `unit` 字段;prom OTLP
+   receiver 默认 strategy 加 `_milliseconds` / `_total` 等后缀)。详见
+   `observability/README.md` §Naming。生产迁移到自建 collector + remote_write
+   时无需改命名,dashboard 直接复用。
 
 ---
 
