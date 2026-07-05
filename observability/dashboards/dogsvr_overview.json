@@ -100,13 +100,13 @@
       "id": 9,
       "type": "timeseries",
       "title": "Process RSS (bytes)",
+      "description": "Compares legacy process_resident_memory_bytes (main-thread only, per-process) with dogsvr_process_rss_bytes (from /proc, whole process). They should track each other closely.",
       "gridPos": { "h": 6, "w": 12, "x": 12, "y": 22 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [{
-        "expr": "process_resident_memory_bytes",
-        "legendFormat": "{{svr}}/{{role}}",
-        "refId": "A"
-      }],
+      "targets": [
+        { "expr": "process_resident_memory_bytes", "legendFormat": "legacy {{svr}}/{{role}}", "refId": "A" },
+        { "expr": "dogsvr_process_rss_bytes", "legendFormat": "/proc {{svr}}", "refId": "B" }
+      ],
       "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
     }
   ]

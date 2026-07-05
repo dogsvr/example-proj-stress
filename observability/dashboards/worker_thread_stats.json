@@ -1,0 +1,179 @@
+{
+  "title": "Worker Thread Stats",
+  "uid": "worker-thread-stats",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Per-thread CPU utilization",
+      "description": "Δrun / Δwall over the last sampling window. 1.0 = one core saturated. When ELU is silent (sync tight loop), this still moves — that's the value of the /proc track.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "dogsvr_thread_cpu_utilization",
+        "legendFormat": "{{svr}}/{{thread_role}}/{{worker_index}}",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1.5 }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "CPU time by role (rate)",
+      "description": "Sum by thread_role should approximately equal rate(process_cpu_time_seconds_total). If not, /proc mode is 'stat' fallback (schedstats disabled).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum by (svr, thread_role) (rate(dogsvr_thread_cpu_time_seconds_total[1m]))",
+        "legendFormat": "{{svr}}/{{thread_role}}",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Worker ELU vs Thread CPU utilization",
+      "description": "ELU (event loop utilization) should track thread CPU utilization when the worker's work is inside the event loop. Divergence indicates sync tight loops (CPU high, ELU flat) or off-loop native work.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "dogsvr_worker_elu_utilization",
+          "legendFormat": "ELU {{svr}}/{{worker_index}}",
+          "refId": "A"
+        },
+        {
+          "expr": "dogsvr_thread_cpu_utilization{thread_role=\"worker\"}",
+          "legendFormat": "CPU {{svr}}/{{worker_index}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1.5 }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Worker heap used / limit",
+      "description": "heapUsed climbing to heap_size_limit → OOM imminent.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "dogsvr_worker_heap_used_bytes", "legendFormat": "used {{svr}}/{{worker_index}}", "refId": "A" },
+        { "expr": "dogsvr_worker_heap_total_bytes", "legendFormat": "total {{svr}}/{{worker_index}}", "refId": "B" },
+        { "expr": "dogsvr_worker_heap_limit_bytes", "legendFormat": "limit {{svr}}/{{worker_index}}", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Worker external / arrayBuffers",
+      "description": "external memory covers native-addon allocations (e.g. mongodb driver buffers). arrayBuffers is a subset.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "dogsvr_worker_heap_external_bytes", "legendFormat": "external {{svr}}/{{worker_index}}", "refId": "A" },
+        { "expr": "dogsvr_worker_heap_arraybuffers_bytes", "legendFormat": "arrayBuffers {{svr}}/{{worker_index}}", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Worker eventloop lag (mean, s)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "dogsvr_worker_eventloop_lag_seconds",
+        "legendFormat": "{{svr}}/{{worker_index}}",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Cmd handler in-flight (per worker)",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "dogsvr_worker_cmd_hdl_pending",
+        "legendFormat": "{{svr}}/{{worker_index}}",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "P99 GC pause (s) by kind",
+      "description": "major kind rising indicates GC pressure — often a leading indicator of heap growth. Watch alongside heap_used.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "histogram_quantile(0.99, sum by (le, svr, worker_index, kind) (rate(dogsvr_worker_gc_duration_seconds_bucket[1m])))",
+        "legendFormat": "{{svr}}/{{worker_index}}/{{kind}}",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "GC events per second by kind",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum by (svr, worker_index, kind) (rate(dogsvr_worker_gc_count_total[1m]))",
+        "legendFormat": "{{svr}}/{{worker_index}}/{{kind}}",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "P99 cmd handler duration (ms) by cmd_id",
+      "description": "Worker-only cmd handler timing. Complements dogsvr_cmd_duration (which measures main-thread dispatch to reply). Divergence = main↔worker IPC/queue overhead.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 38 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "histogram_quantile(0.99, sum by (le, svr, cmd_id) (rate(dogsvr_worker_cmd_hdl_duration_milliseconds_bucket[1m])))",
+        "legendFormat": "{{svr}}/{{cmd_id}}",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Process memory: RSS + VSZ",
+      "description": "VSZ − RSS grows when there's heavy mmap (e.g. mongodb driver). RSS >> Σ(worker heap_total) is normal — includes code, libuv buffers, native addon, V8-external malloc.",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "dogsvr_process_rss_bytes", "legendFormat": "RSS {{svr}}", "refId": "A" },
+        { "expr": "dogsvr_process_vsz_bytes", "legendFormat": "VSZ {{svr}}", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Total OS thread count",
+      "description": "Includes main + all workers + libuv threadpool + V8 GC/optimizer. Sudden jump usually = hotUpdate rolling window.",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "dogsvr_process_thread_count",
+        "legendFormat": "{{svr}}",
+        "refId": "A"
+      }]
+    }
+  ]
+}

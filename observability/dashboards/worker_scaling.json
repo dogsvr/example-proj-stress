@@ -16,7 +16,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{
         "expr": "dogsvr_worker_pending{svr=\"zonesvr\"}",
-        "legendFormat": "worker {{worker}}", "refId": "A"
+        "legendFormat": "worker {{worker_index}}", "refId": "A"
       }]
     },
     {
