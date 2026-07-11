@@ -65,8 +65,8 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{
-        "expr": "histogram_quantile(0.99, sum(rate(mongo_op_duration_milliseconds_bucket[1m])) by (le, coll, op))",
-        "legendFormat": "{{coll}}.{{op}}",
+        "expr": "histogram_quantile(0.99, sum(rate(mongo_op_duration_milliseconds_bucket[1m])) by (le, svr, coll, op))",
+        "legendFormat": "{{svr}}/{{coll}}.{{op}}",
         "refId": "A"
       }],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
@@ -78,8 +78,8 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{
-        "expr": "histogram_quantile(0.99, sum(rate(redis_op_duration_milliseconds_bucket[1m])) by (le, op))",
-        "legendFormat": "{{op}}",
+        "expr": "histogram_quantile(0.99, sum(rate(redis_op_duration_milliseconds_bucket[1m])) by (le, svr, op))",
+        "legendFormat": "{{svr}}/{{op}}",
         "refId": "A"
       }],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }

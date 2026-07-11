@@ -19,7 +19,7 @@
         "legendFormat": "{{svr}}/{{thread_role}}/{{worker_index}}",
         "refId": "A"
       }],
-      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1.5 }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
     },
     {
       "id": 2,
@@ -54,7 +54,7 @@
           "refId": "B"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1.5 }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
     },
     {
       "id": 4,
