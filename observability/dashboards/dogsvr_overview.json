@@ -108,6 +108,77 @@
         { "expr": "dogsvr_process_rss_bytes", "legendFormat": "/proc {{svr}}", "refId": "B" }
       ],
       "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Msg channel: SAB hit rate (msg/s)",
+      "description": "Msg frames delivered via SAB ring buffer. main = main→worker; worker = worker→main. Sum over both sides gives total Msg throughput on the SAB path.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_sab_hits_total[1m]))",
+        "legendFormat": "{{svr}}/w{{worker_index}}/{{side}}",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Msg channel: postMessage fallback rate (msg/s)",
+      "description": "Rate of frames that missed SAB and fell back to postMessage. Non-zero indicates SAB is undersized or spiky bursts overflow the ring. If sustained > 0, bump channel.msg.sabSizeBytes.",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_fallback_total[1m]))",
+        "legendFormat": "{{svr}}/w{{worker_index}}/{{side}}",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 20 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Msg channel: fallback ratio (%)",
+      "description": "fallback / (SAB + fallback). 0% = pure SAB. > 5% sustained means SAB is the bottleneck — increase channel.msg.sabSizeBytes.",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [{
+        "expr": "100 * sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_fallback_total[1m])) / (sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_sab_hits_total[1m])) + sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_fallback_total[1m])))",
+        "legendFormat": "{{svr}}/w{{worker_index}}/{{side}}",
+        "refId": "A"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      }
     }
   ]
 }
