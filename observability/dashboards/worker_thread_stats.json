@@ -59,8 +59,8 @@
     {
       "id": 4,
       "type": "timeseries",
-      "title": "Worker heap used / limit",
-      "description": "heapUsed climbing to heap_size_limit → OOM imminent.",
+      "title": "Worker heap used / limit (V8 managed)",
+      "description": "V8 GC-tracked heap only. Does NOT include external/arrayBuffers native memory — see 'Worker memory decomposition' below for the full V8 view, and 'Process memory' at the bottom for RSS. heap_used climbing to heap_limit → OOM imminent for this isolate.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
@@ -73,13 +73,14 @@
     {
       "id": 5,
       "type": "timeseries",
-      "title": "Worker external / arrayBuffers",
-      "description": "external memory covers native-addon allocations (e.g. mongodb driver buffers). arrayBuffers is a subset.",
+      "title": "Worker memory (V8 view: heap + external + arrayBuffers)",
+      "description": "V8's view of worker memory: heap_used (GC-tracked) + external (native-addon buffers, e.g. mongodb wire buffers) + arrayBuffers (JS ArrayBuffer; Node 20+: a subset of external, shown separately for visibility). Panel 4 above only shows heap_used and hides external — if 'external' or 'arrayBuffers' is large here (e.g. mongodb-heavy worker), Panel 4 alone will understate memory pressure.",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "expr": "dogsvr_worker_heap_external_bytes", "legendFormat": "external {{svr}}/{{worker_index}}", "refId": "A" },
-        { "expr": "dogsvr_worker_heap_arraybuffers_bytes", "legendFormat": "arrayBuffers {{svr}}/{{worker_index}}", "refId": "B" }
+        { "expr": "dogsvr_worker_heap_used_bytes", "legendFormat": "heap {{svr}}/{{worker_index}}", "refId": "A" },
+        { "expr": "dogsvr_worker_heap_external_bytes", "legendFormat": "external {{svr}}/{{worker_index}}", "refId": "B" },
+        { "expr": "dogsvr_worker_heap_arraybuffers_bytes", "legendFormat": "arrayBuffers {{svr}}/{{worker_index}}", "refId": "C" }
       ],
       "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
     },
@@ -152,13 +153,14 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Process memory: RSS + VSZ",
-      "description": "VSZ − RSS grows when there's heavy mmap (e.g. mongodb driver). RSS >> Σ(worker heap_total) is normal — includes code, libuv buffers, native addon, V8-external malloc.",
+      "title": "Process memory: RSS / VSZ / Σ worker V8-known",
+      "description": "'V8-known' = Σ per-worker (heap_used + external + arrayBuffers). Gap (RSS − V8-known) ≈ main-thread heap + code segments + libuv buffers + native addon static memory + Pyroscope buffers. Note svr label differs: worker gauges use svr='<name>-worker', process gauges use svr='<name>'.",
       "gridPos": { "h": 6, "w": 12, "x": 0, "y": 46 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         { "expr": "dogsvr_process_rss_bytes", "legendFormat": "RSS {{svr}}", "refId": "A" },
-        { "expr": "dogsvr_process_vsz_bytes", "legendFormat": "VSZ {{svr}}", "refId": "B" }
+        { "expr": "dogsvr_process_vsz_bytes", "legendFormat": "VSZ {{svr}}", "refId": "B" },
+        { "expr": "sum by (svr) (dogsvr_worker_heap_used_bytes + dogsvr_worker_heap_external_bytes + dogsvr_worker_heap_arraybuffers_bytes)", "legendFormat": "Σ V8-known {{svr}}", "refId": "C" }
       ],
       "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
     },

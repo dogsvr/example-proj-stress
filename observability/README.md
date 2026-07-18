@@ -60,6 +60,12 @@ on ingest. Dashboard PromQL queries the post-translation names — e.g.
   active rooms, total clients, broadcast rate, battlesvr eventloop lag.
 - `worker_scaling.json` — per-worker pending requests, total QPS, p99 by
   cmdId. Used to spot main-thread bottlenecks when the QPS curve plateaus.
+- `profile_flamegraph.json` — Pyroscope continuous CPU flame graphs. Main
+  thread, worker threads (aggregate), and per-worker breakdown, plus a diff
+  panel, a wall:samples:count comparison panel, and heap (inuse_space) flames
+  for main + per-worker. Variables: `$svr` (dir/zonesvr/battlesvr),
+  `$worker_index`. Requires `profiling.enabled` in the corresponding svr's
+  `main_thread_config.json` / `worker_thread_config.json`.
 
 These are reusable in production: metric names and labels are not
 stress-specific. Drop the JSONs into a production Grafana with a Prometheus

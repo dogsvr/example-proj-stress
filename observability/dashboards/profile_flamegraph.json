@@ -1,0 +1,150 @@
+{
+  "title": "Profile flamegraph",
+  "uid": "profile-flamegraph",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-15m", "to": "now" },
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "svr",
+        "type": "custom",
+        "label": "svr",
+        "query": "dir,zonesvr,battlesvr",
+        "current": { "text": "battlesvr", "value": "battlesvr" },
+        "options": [
+          { "text": "dir",       "value": "dir",       "selected": false },
+          { "text": "zonesvr",   "value": "zonesvr",   "selected": false },
+          { "text": "battlesvr", "value": "battlesvr", "selected": true  }
+        ]
+      },
+      {
+        "name": "worker_index",
+        "type": "custom",
+        "label": "worker_index",
+        "query": "0,1",
+        "current": { "text": "0", "value": "0" },
+        "options": [
+          { "text": "0", "value": "0", "selected": true  },
+          { "text": "1", "value": "1", "selected": false }
+        ]
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "flamegraph",
+      "title": "Flame — $svr main thread",
+      "description": "Continuous CPU flame graph for the pm2 main Node process. Aggregate view across all sampled intervals in the selected time range.",
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+      "targets": [{
+        "refId": "A",
+        "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+        "labelSelector": "{service_name=\"$svr\", thread=\"main\"}",
+        "profileTypeId": "wall:cpu:nanoseconds:wall:nanoseconds",
+        "groupBy": [],
+        "queryType": "profile"
+      }]
+    },
+    {
+      "id": 2,
+      "type": "flamegraph",
+      "title": "Flame — $svr worker threads (all)",
+      "description": "All business worker threads aggregated. Use the per-worker panel below when the aggregate hides per-worker skew.",
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 14 },
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+      "targets": [{
+        "refId": "A",
+        "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+        "labelSelector": "{service_name=\"$svr\", thread=\"worker\"}",
+        "profileTypeId": "wall:cpu:nanoseconds:wall:nanoseconds",
+        "groupBy": [],
+        "queryType": "profile"
+      }]
+    },
+    {
+      "id": 3,
+      "type": "flamegraph",
+      "title": "Flame — $svr worker[$worker_index]",
+      "description": "Single worker breakdown. Set $worker_index to the specific worker of interest; battlesvr only has index 0.",
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+      "targets": [{
+        "refId": "A",
+        "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+        "labelSelector": "{service_name=\"$svr\", thread=\"worker\", worker_index=\"$worker_index\"}",
+        "profileTypeId": "wall:cpu:nanoseconds:wall:nanoseconds",
+        "groupBy": [],
+        "queryType": "profile"
+      }]
+    },
+    {
+      "id": 4,
+      "type": "flamegraph",
+      "title": "Diff flame — $svr main (baseline vs current)",
+      "description": "Comparison view. Adjust the dashboard time range to cover baseline + load, then use the panel's built-in Diff controls to pick the two sub-ranges.",
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 42 },
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+      "targets": [{
+        "refId": "A",
+        "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+        "labelSelector": "{service_name=\"$svr\", thread=\"main\"}",
+        "profileTypeId": "wall:cpu:nanoseconds:wall:nanoseconds",
+        "groupBy": [],
+        "queryType": "profile"
+      }]
+    },
+    {
+      "id": 5,
+      "type": "flamegraph",
+      "title": "Samples — $svr main (wall:samples:count)",
+      "description": "Sample-count view of the same wall profiler. Compare against the wall:cpu panel above to spot slots where the CPU-time weighting shifts function ranking vs raw sample counts.",
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 56 },
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+      "targets": [{
+        "refId": "A",
+        "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+        "labelSelector": "{service_name=\"$svr\", thread=\"main\"}",
+        "profileTypeId": "wall:samples:count:wall:nanoseconds",
+        "groupBy": [],
+        "queryType": "profile"
+      }]
+    },
+    {
+      "id": 6,
+      "type": "flamegraph",
+      "title": "Heap — $svr main (inuse_space bytes)",
+      "description": "Live heap by allocation site. Frames sized by bytes currently held live. Use to spot leaks / oversized retained objects.",
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 70 },
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+      "targets": [{
+        "refId": "A",
+        "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+        "labelSelector": "{service_name=\"$svr\", thread=\"main\"}",
+        "profileTypeId": "memory:inuse_space:bytes:inuse_space:bytes",
+        "groupBy": [],
+        "queryType": "profile"
+      }]
+    },
+    {
+      "id": 7,
+      "type": "flamegraph",
+      "title": "Heap — $svr worker[$worker_index] (inuse_space bytes)",
+      "description": "Per-worker live heap. battlesvr only has index 0.",
+      "gridPos": { "h": 14, "w": 24, "x": 0, "y": 84 },
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+      "targets": [{
+        "refId": "A",
+        "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+        "labelSelector": "{service_name=\"$svr\", thread=\"worker\", worker_index=\"$worker_index\"}",
+        "profileTypeId": "memory:inuse_space:bytes:inuse_space:bytes",
+        "groupBy": [],
+        "queryType": "profile"
+      }]
+    }
+  ]
+}
