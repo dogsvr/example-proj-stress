@@ -3,7 +3,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
-import { snapshotCounters } from './otel_metrics_client';
+import { snapshotCounters } from './otel_client';
 import { log } from './log';
 
 const REPORTS_ROOT = path.resolve(__dirname, '../../reports');

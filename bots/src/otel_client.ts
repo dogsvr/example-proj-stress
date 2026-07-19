@@ -1,17 +1,28 @@
-// Client metrics for stress bots via OpenTelemetry SDK + OTLP HTTP push.
-// Plain-counter mirror enables synchronous reads for in-process scenario verdict logic.
-// Cluster-mode scenarios (where mirror is per-process) read final counters from Prometheus
-// instead — see prom_query.ts.
+// Bot-side OpenTelemetry client: metrics (OTLP push) + tracing (OTLP batch).
+// Plain-counter mirror enables synchronous reads for in-process scenario verdicts;
+// cluster-mode scenarios read final counters from Prometheus (see prom_query.ts).
 
-import { metrics, type Counter, type Histogram, type UpDownCounter } from '@opentelemetry/api';
+import {
+    metrics, context, propagation, trace,
+    SpanKind, SpanStatusCode,
+    type Counter, type Histogram, type UpDownCounter, type Span,
+} from '@opentelemetry/api';
 import { MeterProvider, AggregationType, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
+import { NodeTracerProvider, BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
+import { W3CTraceContextPropagator } from '@opentelemetry/core';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 
-const DEFAULT_OTLP_METRICS_ENDPOINT = 'http://localhost:4318/v1/metrics';
+const DEFAULT_OTLP_ENDPOINT_BASE = 'http://localhost:4318';
+const TRACER_NAME = 'stress-bots';
 const RTT_BUCKETS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000];
 
-let provider: MeterProvider | null = null;
+// ---- Providers ------------------------------------------------------------
+
+let meterProvider: MeterProvider | null = null;
+let tracerProvider: NodeTracerProvider | null = null;
 let runId = '';
 
 let cmdRttHist: Histogram | null = null;
@@ -22,6 +33,21 @@ let cycleFailureHist: Counter | null = null;
 let activeBotsGauge: UpDownCounter | null = null;
 let roomsJoinedGauge: UpDownCounter | null = null;
 
+export interface TelemetryOptions {
+    serviceName?: string;
+    otlpBase?: string;
+    resourceAttributes?: Record<string, string>;
+}
+
+function makeResource(opts: TelemetryOptions) {
+    return resourceFromAttributes({
+        'service.name': opts.serviceName ?? 'stress-bots',
+        ...(opts.resourceAttributes ?? {}),
+    });
+}
+
+// ---- Metrics --------------------------------------------------------------
+
 const counterMirror = new Map<string, number>();
 const labelsMirror = new Map<string, Record<string, string>>();
 
@@ -31,7 +57,6 @@ function bumpMirror(name: string, labels: Record<string, string>, delta: number)
     if (!labelsMirror.has(key)) labelsMirror.set(key, labels);
 }
 
-/** Aggregate snapshot of plain mirror. Each entry is one (metric, labels) bucket. */
 export interface CounterSnapshot {
     name: string;
     labels: Record<string, string>;
@@ -48,7 +73,6 @@ export function snapshotCounters(): CounterSnapshot[] {
     return out;
 }
 
-/** Sum across all label-tuples for a given metric name. */
 export function sumCounter(name: string): number {
     let s = 0;
     const prefix = name + '|';
@@ -58,7 +82,6 @@ export function sumCounter(name: string): number {
     return s;
 }
 
-/** Sum across counter buckets where label[key] === value. */
 export function sumCounterByLabel(name: string, key: string, value: string): number {
     let s = 0;
     for (const entry of snapshotCounters()) {
@@ -68,7 +91,6 @@ export function sumCounterByLabel(name: string, key: string, value: string): num
     return s;
 }
 
-/** Group counter values by label[key]; returns { labelValue: sum }. */
 export function collectByLabel(name: string, key: string): Record<string, number> {
     const out: Record<string, number> = {};
     for (const entry of snapshotCounters()) {
@@ -79,20 +101,14 @@ export function collectByLabel(name: string, key: string): Record<string, number
     return out;
 }
 
-export function startBotMetrics(otlpEndpoint?: string): void {
-    if (provider) return;
-
-    const url = otlpEndpoint
-        ?? process.env.STRESS_BOTS_OTLP_ENDPOINT
-        ?? process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
-        ?? DEFAULT_OTLP_METRICS_ENDPOINT;
-
+function startMetrics(opts: TelemetryOptions): void {
+    if (meterProvider) return;
+    const url = (opts.otlpBase ?? process.env.STRESS_BOTS_OTLP_ENDPOINT ?? DEFAULT_OTLP_ENDPOINT_BASE) + '/v1/metrics';
     const exporter = new OTLPMetricExporter({ url });
-
     runId = process.env.STRESS_RUN_ID ?? `pid-${process.pid}`;
 
-    provider = new MeterProvider({
-        resource: resourceFromAttributes({ 'service.name': 'stress-bots' }),
+    meterProvider = new MeterProvider({
+        resource: makeResource(opts),
         readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 5000 })],
         views: [
             {
@@ -101,25 +117,22 @@ export function startBotMetrics(otlpEndpoint?: string): void {
             },
         ],
     });
-    metrics.setGlobalMeterProvider(provider);
+    metrics.setGlobalMeterProvider(meterProvider);
 
     const meter = metrics.getMeter('stress-bots');
-    cmdRttHist        = meter.createHistogram('bot_cmd_rtt',             { description: 'Round-trip latency observed by bots, by cmd label.', unit: 'ms' });
-    cmdErrorHist      = meter.createCounter('bot_cmd_error_total',       { description: 'Bot-side errors (timeout / disconnect / server_error / unknown).' });
-    cmdSuccessHist    = meter.createCounter('bot_cmd_success_total',     { description: 'Bot-side successful calls.' });
-    cycleSuccessHist  = meter.createCounter('bot_cycle_success_total',   { description: 'Full login→battle→end cycles completed without error.' });
-    cycleFailureHist  = meter.createCounter('bot_cycle_failure_total',   { description: 'Full cycles aborted by an error.' });
-    activeBotsGauge   = meter.createUpDownCounter('bot_active_count',    { description: 'Active bots currently running.' });
-    roomsJoinedGauge  = meter.createUpDownCounter('bot_rooms_joined',    { description: 'Bots currently inside a Colyseus room.' });
+    cmdRttHist       = meter.createHistogram('bot_cmd_rtt',           { description: 'Round-trip latency observed by bots, by cmd label.', unit: 'ms' });
+    cmdErrorHist     = meter.createCounter('bot_cmd_error_total',     { description: 'Bot-side errors (timeout / disconnect / server_error / unknown).' });
+    cmdSuccessHist   = meter.createCounter('bot_cmd_success_total',   { description: 'Bot-side successful calls.' });
+    cycleSuccessHist = meter.createCounter('bot_cycle_success_total', { description: 'Full login→battle→end cycles completed without error.' });
+    cycleFailureHist = meter.createCounter('bot_cycle_failure_total', { description: 'Full cycles aborted by an error.' });
+    activeBotsGauge  = meter.createUpDownCounter('bot_active_count',  { description: 'Active bots currently running.' });
+    roomsJoinedGauge = meter.createUpDownCounter('bot_rooms_joined',  { description: 'Bots currently inside a Colyseus room.' });
 }
 
-export async function stopBotMetrics(): Promise<void> {
-    await provider?.shutdown();
-    provider = null;
+async function stopMetrics(): Promise<void> {
+    await meterProvider?.shutdown();
+    meterProvider = null;
 }
-
-// ---- Helper API (record/inc shape). All Counters/Gauges auto-tag run_id
-// so prom_query.ts can isolate runs via {run_id="..."}.
 
 export const cmdRtt = {
     record(ms: number, attrs: { cmd: string; scenario: string }): void {
@@ -169,11 +182,68 @@ export const roomsJoined = {
     dec(scenario: string): void { roomsJoinedGauge?.add(-1, { scenario, run_id: runId }); },
 };
 
-/** Classify a thrown error / disconnect into one of the kind labels. */
 export function classifyError(err: unknown): 'timeout' | 'disconnect' | 'server_error' | 'unknown' {
     const msg = String((err as { message?: string })?.message ?? err ?? '').toLowerCase();
     if (msg.includes('timeout')) return 'timeout';
     if (msg.includes('disconnect') || msg.includes('closed') || msg.includes('econnrefused') || msg.includes('econnreset')) return 'disconnect';
     if (msg.includes('errcode') || msg.includes('not authorized') || msg.includes('invalid')) return 'server_error';
     return 'unknown';
+}
+
+// ---- Tracing --------------------------------------------------------------
+
+function startTracing(opts: TelemetryOptions): void {
+    if (tracerProvider) return;
+    const url = (opts.otlpBase ?? process.env.STRESS_BOTS_OTLP_ENDPOINT ?? DEFAULT_OTLP_ENDPOINT_BASE) + '/v1/traces';
+    context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+    propagation.setGlobalPropagator(new W3CTraceContextPropagator());
+    tracerProvider = new NodeTracerProvider({
+        resource: makeResource(opts),
+        spanProcessors: [new BatchSpanProcessor(new OTLPTraceExporter({ url }))],
+    });
+    trace.setGlobalTracerProvider(tracerProvider);
+}
+
+async function stopTracing(): Promise<void> {
+    await tracerProvider?.shutdown();
+    tracerProvider = null;
+}
+
+export async function startClientSpan<T>(
+    name: string,
+    attrs: Record<string, string | number | boolean>,
+    fn: () => Promise<T>,
+): Promise<T> {
+    const tracer = trace.getTracer(TRACER_NAME);
+    return tracer.startActiveSpan(name, { kind: SpanKind.CLIENT, attributes: attrs }, async (span: Span) => {
+        try {
+            const r = await fn();
+            span.end();
+            return r;
+        } catch (err) {
+            span.recordException(err as Error);
+            span.setStatus({ code: SpanStatusCode.ERROR });
+            span.end();
+            throw err;
+        }
+    });
+}
+
+export function injectTraceHead<T extends Record<string, unknown>>(head: T): T {
+    propagation.inject(context.active(), head, {
+        set: (carrier, key, value) => { (carrier as Record<string, unknown>)[key] = value; },
+    });
+    return head;
+}
+
+// ---- Aggregate entry ------------------------------------------------------
+
+export function startTelemetry(opts: TelemetryOptions = {}): void {
+    startTracing(opts);
+    startMetrics(opts);
+}
+
+export async function stopTelemetry(): Promise<void> {
+    await stopMetrics();
+    await stopTracing();
 }

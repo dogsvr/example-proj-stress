@@ -1,4 +1,5 @@
-// Single-bot login flow: dir (HTTP) + zonesvr (WS) via tsrpc Node SDK.
+// Bot: one persistent zonesvr WS + dir HTTP + Colyseus client, driving the
+// full connect / login / start_battle / disconnect lifecycle.
 
 import { WsClient, HttpClient } from 'tsrpc';
 import { Client as ColyseusClient } from '@colyseus/sdk';
@@ -10,15 +11,14 @@ import type {
     ZoneStartBattleReq, ZoneStartBattleRes,
     ZoneBattleEndNtf,
 } from 'example-proj/protocols/cmd_proto';
-import { cmdRtt, cmdSuccessTotal, cmdErrorTotal, classifyError } from './otel_metrics_client';
-import { startClientSpan, injectTraceHead } from './otel_tracing_client';
+import { cmdRtt, cmdSuccessTotal, cmdErrorTotal, classifyError, startClientSpan, injectTraceHead } from './otel_client';
 import { log } from './log';
 
 export interface BotEndpoints {
     dirHost: string;
-    dirPort: number;    // default 10000
+    dirPort: number;
     zonesvrHost: string;
-    zonesvrPort: number;  // default 20000
+    zonesvrPort: number;
 }
 
 export const DEFAULT_ENDPOINTS: BotEndpoints = {
@@ -29,7 +29,7 @@ export const DEFAULT_ENDPOINTS: BotEndpoints = {
 };
 
 export interface LoginCredentials {
-    openId: string;  // e.g. 'stress_42' — matches the stress:fill seeding scheme
+    openId: string;
     zoneId: number;
     name: string;
 }
@@ -42,10 +42,6 @@ export interface BotRole {
     score: number;
 }
 
-/**
- * One Bot = one persistent zonesvr WS connection.
- * Call connectAndLogin() to start.
- */
 export class Bot {
     readonly creds: LoginCredentials;
     readonly endpoints: BotEndpoints;
@@ -70,11 +66,8 @@ export class Bot {
         return this.zoneClient?.isConnected ?? false;
     }
 
-    /**
-     * Per-bot Colyseus Client reuse: same endpoint → return existing; different
-     * endpoint → replace + new. Avoids the per-cycle `new Client()` churn that
-     * appears to feed schema decoder cross-instance pollution.
-     */
+    // Same endpoint reuses the existing Colyseus Client; different endpoint replaces it.
+    // Avoids per-cycle `new Client()` churn suspected to feed schema decoder cross-instance pollution.
     getColyseusClient(endpoint: string): ColyseusClient {
         if (this.colyseusClient && this.colyseusEndpoint === endpoint) {
             return this.colyseusClient;
@@ -84,7 +77,6 @@ export class Bot {
         return this.colyseusClient;
     }
 
-    /** Anonymous dir HTTP call. */
     async queryZoneList(): Promise<DirQueryZoneListRes> {
         return startClientSpan('bot.DIR_QUERY_ZONE_LIST', { 'rpc.cmd_id': cmdId.DIR_QUERY_ZONE_LIST }, async () => {
             const dirClient = new HttpClient(serviceProto, {
@@ -146,7 +138,6 @@ export class Bot {
         });
     }
 
-    /** Disconnect zonesvr WS. Idempotent. */
     async disconnect(): Promise<void> {
         if (this.zoneClient && this.zoneClient.isConnected) {
             await this.zoneClient.disconnect();
@@ -156,13 +147,11 @@ export class Bot {
         this.colyseusEndpoint = null;
     }
 
-    /** Reconnect after a transient drop (used by scenario D). */
     async reconnect(): Promise<ZoneLoginRes> {
         await this.disconnect();
         return this.connectAndLogin();
     }
 
-    /** Start a battle, returning the ticket + battlesvr addr. */
     async startBattle(syncType: string): Promise<ZoneStartBattleRes> {
         if (!this.zoneClient || !this.role) throw new Error('startBattle before login');
         return startClientSpan('bot.ZONE_START_BATTLE', { 'rpc.cmd_id': cmdId.ZONE_START_BATTLE, 'bot.syncType': syncType }, async () => {
@@ -188,7 +177,6 @@ export class Bot {
         });
     }
 
-    /** Listen for ZONE_BATTLE_END_NTF push from server. */
     onBattleEnd(handler: (ntf: ZoneBattleEndNtf) => void): void {
         if (!this.zoneClient) throw new Error('onBattleEnd before connect');
         this.zoneClient.listenMsg('Common', (msg: any) => {
@@ -201,4 +189,13 @@ export class Bot {
             }
         });
     }
+}
+
+// openId matches example-proj `stress:fill` seeding scheme (stress_0..stress_N-1).
+export function createStressBot(seq: number, scenario: string, zoneId: number, endpoints: BotEndpoints = DEFAULT_ENDPOINTS): Bot {
+    return new Bot(
+        { openId: `stress_${seq}`, zoneId, name: `bot_${seq}` },
+        scenario,
+        endpoints,
+    );
 }

@@ -47,15 +47,8 @@ export function hasFlag(args: ParsedArgs, flag: string): boolean {
     return args.flags[flag] !== undefined;
 }
 
-/** Format milliseconds as human-readable string. */
 export function formatMs(ms: number): string {
     if (ms < 1000) return `${ms}ms`;
     if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
     return `${(ms / 60_000).toFixed(1)}min`;
-}
-
-/** Format epoch ms as local ISO string. */
-export function tsLocal(ms: number): string {
-    const d = new Date(ms);
-    return d.toISOString().replace('T', ' ').slice(0, 19);
 }

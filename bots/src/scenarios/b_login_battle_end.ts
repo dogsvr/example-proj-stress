@@ -1,15 +1,14 @@
 // Scenario B: login / start_battle / battle_end key business flow under progressive concurrency.
 
-import { Bot, DEFAULT_ENDPOINTS } from '../bot_login';
+import { createStressBot } from '../bot';
 import { runBattleSession, DEFAULT_SESSION } from '../bot_battle';
-import { runBotFleet } from '../bot_pool';
-import type { BotInnerLoop, BotOperation, OuterLoopOptions } from '../bot_runtime';
-import { startBotMetrics, stopBotMetrics } from '../otel_metrics_client';
+import { runBotFleet } from '../bot_fleet';
+import type { BotInnerLoop, BotOperation, OuterLoopOptions } from '../bot_fleet';
+import { startTelemetry, stopTelemetry } from '../otel_client';
 import { queryFinalCounters } from '../prom_query';
-import { setupBotTracing, shutdownBotTracing } from '../otel_tracing_client';
-import { writeReport } from '../report';
-import { parseArgs, optNum, optStr, formatMs, hasFlag } from '../cli';
+import { parseArgs, optNum, optStr, hasFlag } from '../cli';
 import { log } from '../log';
+import { runScenario, verdictFromPromStats, promStatsKeyStats, getRunId, formatMs } from './scenario_shell';
 
 const SCENARIO = 'b_login_battle_end';
 
@@ -19,7 +18,6 @@ interface ScenarioBParams {
     rampMs: number;
     gracefulStopMs: number;
     syncType: 'state_sync' | 'lockstep_sync';
-    gidBase: number;
     zoneId: number;
     reloginEveryCycles: number;
     reloginEveryMs: number;
@@ -40,7 +38,6 @@ function readParams(): ScenarioBParams {
         rampMs: optNum(args, 'ramp', 60_000),
         gracefulStopMs: optNum(args, 'graceful-stop-ms', 15_000),
         syncType: sync,
-        gidBase: optNum(args, 'gid-base', 8_000_000),
         zoneId: optNum(args, 'zone-id', 1),
         reloginEveryCycles: optNum(args, 'relogin-every-cycles', 0),
         reloginEveryMs: optNum(args, 'relogin-every-ms', 0),
@@ -53,109 +50,66 @@ function buildOuterLoop(params: ScenarioBParams): OuterLoopOptions | undefined {
     return undefined;
 }
 
-async function main(): Promise<void> {
-    const params = readParams();
-    log.info({ params }, `${SCENARIO} starting`);
+runScenario<ScenarioBParams>({
+    scenario: SCENARIO,
+    readParams,
+    body: async ({ params, startedAt }) => {
+        const battleOp: BotOperation = {
+            name: 'battle',
+            run: (bot, ctx) => runBattleSession(bot, params.syncType, DEFAULT_SESSION, ctx.abortSignal),
+        };
+        const innerLoop: BotInnerLoop = { kind: 'sequence', ops: [battleOp] };
 
-    const startedAt = Date.now();
-
-    const battleOp: BotOperation = {
-        name: 'battle',
-        run: (bot, ctx) => runBattleSession(bot, params.syncType, DEFAULT_SESSION, ctx.abortSignal),
-    };
-    const innerLoop: BotInnerLoop = { kind: 'sequence', ops: [battleOp] };
-
-    await runBotFleet({
-        scenario: SCENARIO,
-        concurrency: params.concurrency,
-        durationMs: params.durationMs,
-        rampMs: params.rampMs,
-        gracefulStopMs: params.gracefulStopMs,
-        innerLoop,
-        outerLoop: buildOuterLoop(params),
-        onWorkerInit: () => {
-            setupBotTracing({ serviceName: 'stress-bots' });
-            startBotMetrics();
-        },
-        onWorkerShutdown: async () => {
-            await stopBotMetrics();
-            await shutdownBotTracing();
-        },
-        setupBot: async (globalIndex: number) => {
-            const seq = (params.gidBase - 8_000_000) + (globalIndex % Math.max(1, params.concurrency));
-            const bot = new Bot(
-                {
-                    openId: `stress_${seq}`,
-                    zoneId: params.zoneId,
-                    name: `bot_${seq}`,
-                },
-                SCENARIO,
-                DEFAULT_ENDPOINTS,
-            );
-            await bot.connectAndLogin();
-            return bot;
-        },
-    });
-
-    const finishedAt = Date.now();
-    log.info({ durationMs: finishedAt - startedAt }, `${SCENARIO} finished, querying final counters from Prometheus`);
-
-    const runId = process.env.STRESS_RUN_ID ?? `pid-${process.pid}`;
-    const stats = await queryFinalCounters({ scenario: SCENARIO, runId, startedAt, finishedAt });
-
-    const passed = stats.ok ? (stats.cyclesTotal + stats.failuresTotal > 0
-        ? stats.failuresTotal / (stats.cyclesTotal + stats.failuresTotal) < 0.01
-        : false) : false;
-    const errorRate = stats.ok && (stats.cyclesTotal + stats.failuresTotal > 0)
-        ? stats.failuresTotal / (stats.cyclesTotal + stats.failuresTotal)
-        : 0;
-
-    await writeReport({
-        scenario: SCENARIO,
-        startedAt,
-        finishedAt,
-        params: params as unknown as Record<string, unknown>,
-        verdict: {
-            passed,
-            reason: !stats.ok
-                ? `Prometheus 查询失败,verdict 不可判定 (inconclusive)。原因: ${stats.reason}。请查 Grafana dashboard 'dogsvr Overview' 人工判定。`
-                : passed
-                    ? `bot 错误率 ${(errorRate * 100).toFixed(2)}% < 1% 阈值。详细 p99/QPS 请查看 Grafana dashboard 'dogsvr Overview'。`
-                    : `bot 错误率 ${(errorRate * 100).toFixed(2)}% 超过 1% 阈值。检查 Grafana dashboard + dogsvr_txn_timeout_total 增量。`,
-            keyStats: stats.ok ? {
-                'concurrency': params.concurrency,
-                'duration': formatMs(params.durationMs),
-                'ramp': formatMs(params.rampMs),
-                'graceful_stop': formatMs(params.gracefulStopMs),
-                'syncType': params.syncType,
-                'cycles_total': stats.cyclesTotal + stats.failuresTotal,
-                'cycles_success': stats.cyclesTotal,
-                'cycles_failure': stats.failuresTotal,
-                'error_rate': `${(errorRate * 100).toFixed(2)}%`,
-                'rtt_p50_ms': stats.rttP50?.toFixed(2) ?? 'n/a',
-                'rtt_p95_ms': stats.rttP95?.toFixed(2) ?? 'n/a',
-                'rtt_p99_ms': stats.rttP99?.toFixed(2) ?? 'n/a',
-                'active_peak': stats.activePeak ?? 'n/a',
-                'cycles_by_op': JSON.stringify(stats.cyclesByOp),
-                'failures_by_phase': JSON.stringify(stats.failuresByPhase),
-                'relogin_every_cycles': params.reloginEveryCycles || '-',
-                'relogin_every_ms': params.reloginEveryMs ? formatMs(params.reloginEveryMs) : '-',
-            } : {
-                'concurrency': params.concurrency,
-                'duration': formatMs(params.durationMs),
-                'cycles_total': 'n/a (prom query failed)',
-                'error_rate': 'n/a',
+        await runBotFleet({
+            scenario: SCENARIO,
+            concurrency: params.concurrency,
+            durationMs: params.durationMs,
+            rampMs: params.rampMs,
+            gracefulStopMs: params.gracefulStopMs,
+            innerLoop,
+            outerLoop: buildOuterLoop(params),
+            onShardInit: () => { startTelemetry(); },
+            onShardShutdown: async () => { await stopTelemetry(); },
+            setupBot: async (globalIndex) => {
+                const seq = globalIndex % Math.max(1, params.concurrency);
+                const bot = createStressBot(seq, SCENARIO, params.zoneId);
+                await bot.connectAndLogin();
+                return bot;
             },
-        },
-        notes: [
-            `查看 Grafana panels:\n  - dogsvr_cmd_duration_milliseconds{cmdId="ZONE_LOGIN"} p99/QPS\n  - mongo_op_duration_milliseconds{coll="role_coll"}\n  - redis_op_duration_milliseconds{op="set"} (锁获取)`,
-            `场景 B 是 C 和 D 的基线,如果这里就异常,先修复再跑 C/D。`,
-            `cycles/failures 来自 Prometheus instant query (run_id=${runId},OTLP push interval 5s,允许 ±5s 计数尾差);RTT 分位见 keyStats / Grafana。`,
-        ],
-    });
-}
+        });
 
-main().catch((err) => {
-    log.error({ err: String(err) }, `${SCENARIO} failed`);
-    process.exit(1);
+        const finishedAt = Date.now();
+        log.info({ durationMs: finishedAt - startedAt }, `${SCENARIO} finished, querying final counters from Prometheus`);
+
+        const runId = getRunId();
+        const stats = await queryFinalCounters({ scenario: SCENARIO, runId, startedAt, finishedAt });
+        const v = verdictFromPromStats(stats, {
+            threshold: 0.01,
+            ok: (r) => `bot 错误率 ${r} < 1% 阈值。详细 p99/QPS 请查看 Grafana dashboard 'dogsvr Overview'。`,
+            fail: (r) => `bot 错误率 ${r} 超过 1% 阈值。检查 Grafana dashboard + dogsvr_txn_timeout_total 增量。`,
+            inconclusive: (why) => `Prometheus 查询失败,verdict 不可判定 (inconclusive)。原因: ${why}。请查 Grafana dashboard 'dogsvr Overview' 人工判定。`,
+        });
+
+        const baseStats = {
+            'concurrency': params.concurrency,
+            'duration': formatMs(params.durationMs),
+            'ramp': formatMs(params.rampMs),
+            'graceful_stop': formatMs(params.gracefulStopMs),
+            'syncType': params.syncType,
+        };
+        const keyStats = promStatsKeyStats(stats, baseStats, v.errorRate);
+        if (stats.ok) {
+            keyStats['relogin_every_cycles'] = params.reloginEveryCycles || '-';
+            keyStats['relogin_every_ms'] = params.reloginEveryMs ? formatMs(params.reloginEveryMs) : '-';
+        }
+
+        return {
+            verdict: { passed: v.passed, reason: v.reason, keyStats },
+            notes: [
+                `查看 Grafana panels:\n  - dogsvr_cmd_duration_milliseconds{cmdId="ZONE_LOGIN"} p99/QPS\n  - mongo_op_duration_milliseconds{coll="role_coll"}\n  - redis_op_duration_milliseconds{op="set"} (锁获取)`,
+                `场景 B 是 C 和 D 的基线,如果这里就异常,先修复再跑 C/D。`,
+                `cycles/failures 来自 Prometheus instant query (run_id=${runId},OTLP push interval 5s,允许 ±5s 计数尾差);RTT 分位见 keyStats / Grafana。`,
+            ],
+        };
+    },
 });

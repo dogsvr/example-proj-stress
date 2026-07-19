@@ -12,6 +12,7 @@
 - [7. Logger isolate 兜底诊断（`--cpu-prof`）](#7-logger-isolate-兜底诊断--cpu-prof)
 - [8. 关闭 / 清理](#8-关闭--清理)
 - [9. 附录：文件位置速查](#9-附录文件位置速查)
+- [10. 已知观测偏差](#10-已知观测偏差)
 
 ## 0. 术语与端口速查
 
@@ -320,6 +321,69 @@ docker stop otel-lgtm && docker rm otel-lgtm    # 需用户许可
 | dogsvr broadcast API | `dogsvr/src/main_thread/index.ts` (`broadcastToWorkers`) |
 | dogsvr worker broadcast 接收 | `dogsvr/src/worker_thread/index.ts` (`onWorkerBroadcast`) |
 | pm2 编排 | `example-proj/ecosystem.config.js` |
+
+---
+
+## 10. 已知观测偏差
+
+开启 profiling（continuous 或 on-demand）后，**worker/main 的 `dogsvr_worker_elu_utilization` / event loop utilization 会被人为拉高**，与真实 CPU 占用严重不符。典型症状：worker ELU 稳定在 30~50% 但 `top` / `pidstat` 看到的 %CPU 只有几个百分点。
+
+### 10.1 机制
+
+1. `@pyroscope/nodejs` 的 wall profiler = `@datadog/pprof` `TimeProfiler` = V8 `CpuProfiler`。Linux 下 V8 通过独立 sampler 线程 `pthread_kill(target_tid, SIGPROF)` 触发采样，被采线程在自己的 signal handler 里做 stack unwind。100 Hz 采样 = 每秒 100 次 SIGPROF 打到 worker 主线程。
+2. SIGPROF 让 `epoll_pwait` 返回 `EINTR`。libuv `uv__io_poll` 的 EINTR 分支**跳过** `uv__metrics_update_idle_time`、重进循环时又 `uv__metrics_set_provider_entry_time` **覆盖** `provider_entry_time`——被打断前累积的那段 `sleep` 时间既没归入 idle，也不算 active，从统计里蒸发。
+3. `performance.eventLoopUtilization().utilization = active / (active + idle)`，分母是**墙钟时间**。idle 缩水 → utilization 抬升；SIGPROF handler 本身很轻（<100 µs/次，100 Hz 累积 <1% CPU），所以 `%CPU` 几乎无变化。
+
+### 10.2 量级参考
+
+以 worker "本来 idle 主导（900 ms/s epoll_pwait + 100 ms/s 业务）" 为例：
+
+| 采样频率 | 每次 SIGPROF 丢失的 idle | ELU 表观值 | 真实 CPU |
+|---|---|---|---|
+| 关闭 | — | ~10% | ~10% |
+| 100 Hz（默认） | ~5 ms | **20~50%** | ~10.5% |
+| 200 Hz | ~5 ms | **40~70%** | ~11% |
+
+**结论**：开着 profiling 时 ELU 不能作为容量告警依据；`%CPU` 才是可信参照。
+
+### 10.3 应对
+
+按 profiling 模式分开处理。
+
+**Continuous 常开（zonesvr/battlesvr 默认）**：ELU 长期偏高，"短暂屏蔽"无意义。
+
+- **首选**：告警口径改用 `dogsvr_worker_eventloop_lag_seconds`（event loop delay 均值）。它反映"事件循环单圈被阻塞多久"，与 SIGPROF signal handler 时长无关，不受采样影响。
+- **次选**：把 profiling 服务的 `dogsvr_worker_elu_utilization` 从告警规则里 filter 掉，仅供人工观察。
+
+**On-demand（SIGUSR2 30 s 窗口）**：真正意义上的"短暂屏蔽"。
+
+在 `example-proj/src/otel/metrics_worker.ts` 的 ELU callback 里，profiling 期间跳过 `r.observe()`（`prevElu` 仍要推进，避免 profiling 段偏差污染下一窗口）：
+
+```ts
+.addCallback((r) => {
+    const now = performance.eventLoopUtilization(prevElu);
+    prevElu = performance.eventLoopUtilization();
+    if (isProfilingActive()) return;   // ← profile_worker.ts 导出该状态
+    r.observe(now.utilization, attrs);
+});
+```
+
+代价：ELU 曲线在 profiling 段有 30 s gap。告警规则通常按 `absent_over_time` 处理为 unknown，不会误报。
+
+**降低偏差量级（通用）**：把 `samplingIntervalMicros` 从 `10000`（100 Hz）调到 `20000`（50 Hz），SIGPROF 频率减半，ELU 偏差也大致减半，代价是 flame 采样密度下降。生产长时段可选。
+
+### 10.4 相关代码位置
+
+| 用途 | 路径 |
+|---|---|
+| ELU gauge 定义 | `example-proj/src/otel/metrics_worker.ts:258` |
+| Event loop delay gauge | `example-proj/src/otel/metrics_worker.ts:269` |
+| Profiling 状态（可导出） | `example-proj/src/profiling/profile_worker.ts` |
+| 采样频率配置 | `example-proj/src/*/worker_thread_config.json` → `profiling.samplingIntervalMicros` |
+
+### 10.5 顺带一提：Pyroscope shutdown
+
+`Pyroscope.stop()` 内部走 undici `fetch` 上传最后一批 profile，无 request timeout。若 4040 不可达，可能挂到内核 TCP 重试超时（>60 s），把 dogsvr 的 `onShutdown drain` 拖长。`profile_main.ts:48` / `profile_worker.ts:53` 已用 `Promise.race + setTimeout(2000).unref()` 包住；pm2 `kill_timeout` 保持默认 1600 ms 时仍可能被硬杀，但不会 leak。
 
 ---
 

@@ -4,10 +4,9 @@
 
 import { Room } from '@colyseus/sdk';
 import type { ZoneStartBattleRes } from 'example-proj/protocols/cmd_proto';
-import { cmdRtt, cmdSuccessTotal, cmdErrorTotal, roomsJoined, classifyError } from './otel_metrics_client';
-import { startClientSpan } from './otel_tracing_client';
-import { sleepUntil, raceAbort, BotAbortError } from './bot_runtime';
-import type { Bot } from './bot_login';
+import { cmdRtt, cmdSuccessTotal, cmdErrorTotal, roomsJoined, classifyError, startClientSpan } from './otel_client';
+import { sleepUntil, raceAbort, BotAbortError } from './bot_fleet';
+import type { Bot } from './bot';
 import { log } from './log';
 
 export interface BattleSessionOptions {
