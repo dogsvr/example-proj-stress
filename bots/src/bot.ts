@@ -10,6 +10,8 @@ import type {
     ZoneLoginReq, ZoneLoginRes,
     ZoneStartBattleReq, ZoneStartBattleRes,
     ZoneBattleEndNtf,
+    ZoneHeartbeatReq, ZoneHeartbeatRes,
+    ZoneQueryRankListReq, ZoneQueryRankListRes,
 } from 'example-proj/protocols/cmd_proto';
 import { cmdRtt, cmdSuccessTotal, cmdErrorTotal, classifyError, startClientSpan, injectTraceHead } from './otel_client';
 import { log } from './log';
@@ -186,6 +188,56 @@ export class Bot {
                 } catch (err) {
                     log.warn({ err: String(err) }, 'failed to parse ZONE_BATTLE_END_NTF');
                 }
+            }
+        });
+    }
+
+    async sendHeartbeat(): Promise<void> {
+        if (!this.zoneClient?.isConnected || !this.role) return;
+        return startClientSpan('bot.ZONE_HEARTBEAT', { 'rpc.cmd_id': cmdId.ZONE_HEARTBEAT }, async () => {
+            const start = process.hrtime.bigint();
+            try {
+                const req: ZoneHeartbeatReq = { clientTs: Date.now() };
+                const head = injectTraceHead<Record<string, unknown>>({ cmdId: cmdId.ZONE_HEARTBEAT, openId: this.role!.openId, zoneId: this.role!.zoneId });
+                const ret = await this.zoneClient!.callApi('Common', {
+                    head: head as never,
+                    innerReq: JSON.stringify(req),
+                });
+                if (!ret.isSucc) {
+                    cmdErrorTotal.add({ cmd: 'ZONE_HEARTBEAT', scenario: this.scenario, kind: 'server_error' });
+                    throw new Error(`ZONE_HEARTBEAT failed: ${ret.err.message}`);
+                }
+                cmdRtt.record(Number(process.hrtime.bigint() - start) / 1e6, { cmd: 'ZONE_HEARTBEAT', scenario: this.scenario });
+                cmdSuccessTotal.add({ cmd: 'ZONE_HEARTBEAT', scenario: this.scenario });
+                JSON.parse(ret.res.innerRes as string) as ZoneHeartbeatRes;
+            } catch (err) {
+                cmdErrorTotal.add({ cmd: 'ZONE_HEARTBEAT', scenario: this.scenario, kind: classifyError(err) });
+                throw err;
+            }
+        });
+    }
+
+    async queryRankList(rankId: number, offset: number, count: number): Promise<ZoneQueryRankListRes> {
+        if (!this.zoneClient || !this.role) throw new Error('queryRankList before login');
+        return startClientSpan('bot.ZONE_QUERY_RANK_LIST', { 'rpc.cmd_id': cmdId.ZONE_QUERY_RANK_LIST, 'rank.id': rankId }, async () => {
+            const start = process.hrtime.bigint();
+            try {
+                const req: ZoneQueryRankListReq = { rankId, offset, count };
+                const head = injectTraceHead<Record<string, unknown>>({ cmdId: cmdId.ZONE_QUERY_RANK_LIST, openId: this.role!.openId, zoneId: this.role!.zoneId });
+                const ret = await this.zoneClient!.callApi('Common', {
+                    head: head as never,
+                    innerReq: JSON.stringify(req),
+                });
+                if (!ret.isSucc) {
+                    cmdErrorTotal.add({ cmd: 'ZONE_QUERY_RANK_LIST', scenario: this.scenario, kind: 'server_error' });
+                    throw new Error(`ZONE_QUERY_RANK_LIST failed: ${ret.err.message}`);
+                }
+                cmdRtt.record(Number(process.hrtime.bigint() - start) / 1e6, { cmd: 'ZONE_QUERY_RANK_LIST', scenario: this.scenario });
+                cmdSuccessTotal.add({ cmd: 'ZONE_QUERY_RANK_LIST', scenario: this.scenario });
+                return JSON.parse(ret.res.innerRes as string) as ZoneQueryRankListRes;
+            } catch (err) {
+                cmdErrorTotal.add({ cmd: 'ZONE_QUERY_RANK_LIST', scenario: this.scenario, kind: classifyError(err) });
+                throw err;
             }
         });
     }

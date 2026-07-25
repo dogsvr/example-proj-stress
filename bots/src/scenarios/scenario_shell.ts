@@ -6,6 +6,27 @@ import { writeReport, type ScenarioVerdict } from '../report';
 import type { FinalStats } from '../prom_query';
 import { formatMs } from '../cli';
 
+// Colyseus @colyseus/schema decoder throws sync from ws.onmessage on refCount drift;
+// swallow only these (leaks the bot's room) so one bad room doesn't kill the fleet.
+let schemaPollutionCount = 0;
+function isColyseusSchemaPollution(err: unknown): boolean {
+    const msg = String((err as { message?: string })?.message ?? err ?? '');
+    const stack = String((err as { stack?: string })?.stack ?? '');
+    if (msg.includes("'~refId'") || msg.includes('refId') && msg.includes('refCount')) return true;
+    return stack.includes('@colyseus/schema') && (stack.includes('removeChildRefs') || stack.includes('ReferenceTracker'));
+}
+process.on('uncaughtException', (err) => {
+    if (isColyseusSchemaPollution(err)) {
+        schemaPollutionCount++;
+        if (schemaPollutionCount <= 5 || schemaPollutionCount % 100 === 0) {
+            log.warn({ err: String(err), total: schemaPollutionCount }, 'Colyseus schema pollution swallowed');
+        }
+        return;
+    }
+    log.error({ err: String(err), stack: (err as Error)?.stack }, 'uncaughtException; exiting');
+    process.exit(1);
+});
+
 export interface ScenarioContext<P> {
     scenario: string;
     params: P;
@@ -40,6 +61,8 @@ export function runScenario<P>(spec: ScenarioSpec<P>): void {
             verdict: result.verdict,
             notes: result.notes,
         });
+        // OTLP/Colyseus keep-alive handles can hold the event loop past writeReport.
+        process.exit(result.verdict.passed ? 0 : 2);
     })().catch((err) => {
         log.error({ err: String(err) }, `${spec.scenario} failed`);
         process.exit(1);

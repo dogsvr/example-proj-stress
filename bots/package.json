@@ -9,7 +9,8 @@
         "scenario:B": "node dist/scenarios/b_login_battle_end.js",
         "scenario:C": "node dist/scenarios/c_worker_scaling.js",
         "scenario:D": "node dist/scenarios/d_hot_update.js",
-        "scenario:E": "node dist/scenarios/e_login_qps.js"
+        "scenario:E": "node dist/scenarios/e_login_qps.js",
+        "scenario:F": "node dist/scenarios/f_realistic_session.js"
     },
     "dependencies": {
         "@colyseus/sdk": "^0.17.42",

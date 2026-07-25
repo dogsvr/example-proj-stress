@@ -242,6 +242,8 @@ function uniformInt(lo: number, hi: number): number {
     return Math.floor(lo + Math.random() * (hi - lo));
 }
 
+export { uniformInt };
+
 // ---- Fleet driver ---------------------------------------------------------
 
 function ensureRunId(): string {
