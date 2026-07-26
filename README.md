@@ -59,6 +59,7 @@ npm run ops -- stress:unfill --count 10000 --yes
 ## See also
 
 - `RUNBOOK.md` — full end-to-end recipe (M7 manual playbook).
+- `analysis/` — cross-run capacity / bottleneck writeups (跨压测的手写分析归档).
 - `../example-proj/README.md` — system under test (3-process topology).
 - `../example-proj-client/README.md` — sibling client (browser, Phaser).
 - `../dogsvr/README.md` — framework that the servers run on.
