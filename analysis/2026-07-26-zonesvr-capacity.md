@@ -32,7 +32,7 @@ _2026-07-26 · 基于三次压测 + Pyroscope wall profile + Prometheus 指标_
     - [5.7.2 实现层面：当前 SAB 的 fixed cost 项](#572-实现层面当前-sab-的-fixed-cost-项)
     - [5.7.3 场景层面：为什么这些 fixed cost 会显现](#573-场景层面为什么这些-fixed-cost-会显现)
     - [5.7.4 SAB 什么时候真的赢](#574-sab-什么时候真的赢)
-    - [5.7.5 可以动的实现优化方向](#575-可以动的实现优化方向不承诺仅列方向)
+    - [5.7.5 实现优化方向（2026-09 已实施）](#575-实现优化方向2026-09-已全部实施)
 - [六、分场景是否合理？—— 分析](#六分场景是否合理--分析)
 - [七、容量预估](#七容量预估)
   - [7.1 zonesvr 单机上限](#71-zonesvr-单机上限当前配置1-main--2-worker)
@@ -62,7 +62,7 @@ _2026-07-26 · 基于三次压测 + Pyroscope wall profile + Prometheus 指标_
   2. **长连接稳态业务**（`f_realistic_session` rank 查询）——瓶颈在 **worker 编解码 CPU** 与 **RoundRobin + bistable 分裂造成的 event loop 拥堵**：main tid 60~64 %CPU，两个 worker 分别 90 / 93 %CPU。当前配置天花板约 **3.1 k rank query/s**。详见 §五。
 - **重要辨别（§5.5）**：cmd p99 988 ms、`mongo_op_duration` p99 484 ms 看似是"mongo 慢"，其实**不是**——同 svr 的 w0 报出的 mongo p99 = 9 ms 才是这台 mongo 的真实延迟。w1 侧长尾是 event loop tick lag 把 `mongo_proxy.timedColl` 里的墙钟计时拉长，redis 五种独立 op 也同步长尾 10~14× 是决定性证据。真正的问题是 **RoundRobin 负载均衡把 w1 卡在深队列稳态**。
 - **用户"重连风暴 vs 普通业务分开分析"合理**：同一份代码两种压力下 CPU 分布相反（主线程 100 %CPU vs 64 %CPU，worker 18 %CPU vs 93 %CPU），瓶颈原因、扩容杠杆都不同。
-- **SAB vs postMessage 差异 < 4 %，进程 wall:cpu 反而 +10 %**：详见 §5.7。原因是场景层面 IPC 只占 worker CPU ~5 %，同时当前 SAB 实现每消息 head JSON + resetIndexes seqlock + 多次 Atomics 累计 fixed cost ~10 μs/op 反而超过 postMessage 的 structured clone 成本。
+- **SAB vs postMessage 差异 < 4 %，进程 wall:cpu 反而 +10 %**：详见 §5.7。场景层面 IPC 只占 worker CPU ~5 %；实现层面当时每消息付两次 `Atomics.notify`，而唤醒一个 park 住的线程要 ~5.9 μs（同等屏障的 28 倍），这一项约占 wall:cpu 缺口的四分之一，是最大单项但非全部。**2026-09 已重写**（经典环形 + notify 消除），实测 notify 消除 99 %+、head 编解码 2.8×；现网收益待复测。
 - **核心动作项**（按优先级，详见 §八）：调低压测 log.level → 换 lbStrategy: leastLoad + 加 worker 数 → 加 mongo/redis 缓存降下游依赖 → 补 pending / event_loop_lag 告警与 profile。
 
 ---
@@ -378,7 +378,9 @@ onMessageResolved(i)         → pending[i]--          (响应回到主线程时
 | w0 IPC 合计 | 7.33 | 11.33 |
 | w1 IPC 合计 | 7.30 | 8.53 |
 
-结论：**SAB 版本每 op 主线程侧比 postMessage 多花 ~4 μs、worker 侧多 1~4 μs**。放到 3 k/s × 300 s = 90 万次消息上，累计 ~8.5 s 额外 CPU（main 4.28 + w0 4.00 + w1 1.23 μs/op × 9e5 ≈ 8.5 s），只解释了实测进程 wall:cpu +93 s 的 ~9 %。方向与实测差异一致，但绝对量级远不够——剩余 ~85 s 未在本轮定位，怀疑来自 §5.7.2 的 setImmediate 反复投递、worker 侧 pumpOnce 循环、以及 head JSON stringify/parse 溢出到非 IPC self-time 桶，需单独测量确认。
+结论：**SAB 版本每 op 主线程侧比 postMessage 多花 ~4 μs、worker 侧多 1~4 μs**。放到 3 k/s × 300 s = 90 万次消息上，累计 ~8.5 s 额外 CPU（main 4.28 + w0 4.00 + w1 1.23 μs/op × 9e5 ≈ 8.5 s），只解释了实测进程 wall:cpu +93 s 的 ~9 %。方向对，但量级远不够。
+
+> **【2026-09 补充】缺口的一部分已定位：`Atomics.notify`。** profile 只抽 self-time，而 notify 唤醒线程的 ~5.9 μs 绝大部分是 native 等待，落在 `:(idle):0` / `:Non JS threads activity:` 桶里，不计进上表任何一行。按每消息两次 notify × 90 万条估算约 10.6 s／单侧、双向 ~21 s，**约占缺口的四分之一**——是最大的单项，但不足以解释全部。其余仍未定位。
 
 #### 5.7.2 实现层面：当前 SAB 的 fixed cost 项
 
@@ -386,7 +388,9 @@ onMessageResolved(i)         → pending[i]--          (响应回到主线程时
 
 1. **head 走 JSON.stringify + JSON.parse**（`sab_msg.js:22, 161`）——每消息一次 stringify + reader 侧一次 parse。head 里 txnId/cmdId/gid/zoneId/openId/traceId 加起来 100~200 B UTF-8。**postMessage 走 V8 structured clone（C++ 实现），对小对象比 JSON 路径快**。
 2. **`sab_ring.resetIndexes` 是 hot path，不是 rare event**（`sab_msg.js:32-36`）——只要 ring 排空后 `write === read && write !== 0` 就 reset 一次。稳态下 write/read 交替追赶，几乎每消息触发。`resetIndexes` 内 2 次 `Atomics.add(SEQ)` + 2 次 `Atomics.store` + `Atomics.notify`，都是内存屏障级操作，profile 里占 main isolate ~9.7 μs/op，是 IPC 层最大的 self time。
-3. **每 op 5~6 次 Atomics 操作**——`readState` seqlock 3 次 load、`commitWrite` 1 次 store + `notify`。单次纳秒级但会累加，且带来 CPU pipeline / cache line invalidation。
+
+   > **【2026-09 修正 · 对象找对了，成本机制说错了】** 贵的不是"2 次 add + 2 次 store 的屏障累计"，而是末尾那次 `Atomics.notify`。实测（Node v24.13.0）：notify 唤醒一个 park 在 `waitAsync` 上的线程 **5889 ns**，无 waiter 时仅 180 ns，而同等的 seq-cst store+load 屏障对只要 **208 ns**——**单次 notify ≈ 28 次屏障**。当时每消息付两次 notify（`resetIndexes` + `commitWrite`），稳态下两次都真的唤醒了对侧。
+3. **每 op 5~6 次 Atomics 操作**——`readState` seqlock 3 次 load、`commitWrite` 1 次 store + `notify`。**【2026-09 修正】** 屏障本身（10~20 ns）可忽略；优化重点不是屏障计数，而是其中**哪一个会唤醒线程**（见上条）。
 4. **worker 侧 pump 通过 `setImmediate` 循环**（`sab_msg.js:102`）——`pumpOnce` 找到 data 后走 `setImmediate(loopBound)` 回下一 tick 再处理。每次都要过 Node 的 Immediate queue，高频消息下累积可见。
 5. **`waitAsync` 空转唤醒经 Promise `.then`**（`sab_msg.js:116-126`）——微任务本身几百纳秒开销，未必比 postMessage 的 uv_async_send + wake 路径短。
 
@@ -401,25 +405,34 @@ onMessageResolved(i)         → pending[i]--          (响应回到主线程时
 
 #### 5.7.4 SAB 什么时候真的赢
 
-- **body 可以 zero-copy 传递**：生产者直接把数据**原地**写在共享 SAB 里，消费者拿到同一段内存的 view，双方都不做 encode / copy——这是 SAB 的机制优势所在。当前 sab_msg 实现**不是**这种模式：string body 走 UTF-16→UTF-8 encode（`sab_msg.js:57`），binary body 走 memcpy（`sab_msg.js:54`），无论 body 多大都要付一次 per-byte 成本。所以本条只有在改造成"零拷贝 view"模式后才成立
+- **body 可以 zero-copy 传递**：生产者原地写进共享 SAB，消费者拿同一段内存的 view，双方都不 encode / copy。**当前实现仍不是这种模式**（2026-09 重写后依然是 string encode / binary memcpy，每字节都要付一次成本）——本条要等 body 也零拷贝才成立
 - **消息频率极高**（比如数万 /s，具体阈值未测）：postMessage 的 wake + clone 才会压倒 SAB 的 poll
 - **对延迟敏感**（想避开 event loop 一次唤醒的抖动）：SAB waitAsync + Promise 可做微秒级唤醒
 - **worker CPU 不是瓶颈**（IPC 占比高）：只有 IPC 是主开销时 SAB 才有杠杆
 
-> **未验证的关系**：SAB vs postMessage 的 crossover（body size / QPS / clone 深度等维度）**当前没有 benchmark 数据**支持——需单独跑一次微基准（body 从 100 B 扫到 1 MB，string 和 Buffer 两种，测每消息 μs）才能给出精确阈值。上面各条只是"何种条件下 SAB 有机会赢"的定性判断。
+> **crossover 阈值仍未测**：2026-09 的重写只测了 head 编解码与 notify 消除（见 §5.7.5），没扫 body size × QPS 的二维曲线。要给出精确阈值仍需单独微基准（body 100 B → 1 MB，string / Buffer 两种）。上面各条是定性判断。
 
-当前 rank query 场景 4 条都不满足。login storm 场景（4.2）主线程侧 postMessage self ~4 s / 178.87 s = 2.2 %，SAB 的 fixed cost 也大概率吃掉这点节省——**除非先做 5.7.5 的实现优化，否则 SAB 在 login storm 场景大概率也不赢**。
+当前 rank query 场景 4 条都不满足。login storm 场景（§4.2）主线程侧 postMessage self ~4 s / 178.87 s = 2.2 %，改前 SAB 的 fixed cost 大概率吃掉这点节省。**§5.7.5 的优化已落地，login storm 是最值得复测的场景**——但注意本节第 1 条（body 零拷贝）仍未满足。
 
-#### 5.7.5 可以动的实现优化方向（不承诺，仅列方向）
+#### 5.7.5 实现优化方向（2026-09 已全部实施）
 
-如果想让 SAB 在这类小 body 场景也能赢过 postMessage：
+原列 4 条方向全部落地，另加一条当时未想到、实际收益最大的（notify 消除）。实现细节见 `dogsvr/docs/explanation/sab_ring_design.md` 与 `sab_transport_layers.md`，此处只记状态与实测。
 
-1. **head 用定长二进制 field**（cmdId u16 + txnId u32 + gid u64 + traceId 16 B …）取代 JSON——预估省 2~4 μs/op
-2. **稳态不 resetIndexes**：ring drain 后不必 reset，改成 write/read 无限增长 + 模运算——直接抹掉当前最大的 self-time 项 ~10 μs/op
-3. **worker 侧 pumpOnce 用 while 消化连续可读消息**，而不是每次 setImmediate 回到 event loop
-4. **head + body 合并写**：合并成一次 struct 写入（一次 length prefix + 一次 UTF-8 encode），减少 `dv.setUint32` / `bufView.write` 调用次数
+| # | 方向 | 状态与实测 |
+|---|---|---|
+| 1 | head 定长二进制取代 JSON | ✅ 混合编码（定长字段 + 扩展位 JSON）。head+body 往返 **2900 → 1054 ns（2.8×）**，head 字节 178 → 105；clc 路径 1.13×，不退化 |
+| 2 | 稳态不 resetIndexes | ✅ 改经典 power-of-2 环形 + 尾部 padding record，`resetIndexes` / seqlock 整体删除 |
+| 3 | pumpOnce 用 while 消化连续消息 | ✅ `drain()` 内 while 整批消化（HEAD 仍每批提交一次，热更新依赖此语义） |
+| 4 | head + body 合并写 | ✅ 单次 claim + 连续写入 + 单次 commit；line 通道同时去掉 scratch 中转 |
+| 5 | **notify 消除**（原未列出） | ✅ Dekker 双检：消费者发布 PARKED 标志，生产者仅在对侧真 park 时才 notify。实测 **消除 99 %+**（12 万条跨线程，零丢失/零乱序） |
 
-做完这些之后 SAB 应该能在小 body 场景也稳定跑赢 postMessage 一小截。参见 dogsvr 仓库 SAB 传输层的 hot path 零分配约束（`dogsvr/src/common/sab_*.ts`）。
+两处对原提法的更正，避免后续读者照抄：
+
+- **`gid` 用 f64 而非 u64**。gid 是 end-to-end JS `number`（上界 2^53−1，见 `example-proj/src/lib/gid_util.ts`），u64 需 BigInt 往返会破坏该承诺；f64 尾数 53 位恰好匹配，且与 u16 同速（均 9 ns）。
+- **`cmdId` / `zoneId` 用 u32 而非 u16**。实测字段宽度几乎不影响 DataView 成本（u16 9 ns / u32 17 ns / f64 9 ns），把 cmdId 压进 meta 低 16 位反而慢 11 ns；而 u16 溢出是静默回绕（`zoneId: 100001` 已超 u16）。
+- **`traceId` 不是 head 字段**，head 里只有 `_otel` 这个 W3C carrier。最优解是 `traceparent` 按原始 ASCII 存并加长度前缀（181 ns vs JSON 964 ns）；不可写死 55 字节——OTel extract 侧不校验长度，未来版本会更长。
+
+> **现网收益待复测**：以上均为本机合成基准。§5.7.3 的判断不变——rank 场景 IPC 只占 worker CPU ~5 %，即便 IPC 归零端到端 QPS 上限也只 +5 % 左右。复跑 `f_realistic_session` 时注意 §8-P0（log.level）与 §8-P1（leastLoad + worker 2→4）都会改变 SAB 写入量与通道实例数，**三者必须串行验证**，否则效果不可区分。
 
 ---
 
@@ -621,7 +634,7 @@ Node / C++ ≈ 1 / (f_native + f_js / r_js)
 
 - BSON codec 换成 native addon（napi-rs / bson-ext）→ 单项能拿走 ~0.5 的比值，是最现实的一步
 - Redis 客户端换 hiredis-node 类 native binding → 再拿 ~0.3
-- 关键 handler 走 SharedArrayBuffer zero-copy view（要求 §5.7.5 的 SAB 实现改造）
+- 关键 handler 走 SharedArrayBuffer zero-copy view——注意 §5.7.5 的重写**不含**这一项：body 仍是 string encode / binary memcpy，零拷贝需要另做（见 §5.7.4 第 1 条）
 - 完全绕开 V8 GC 的对象池 pattern（工程复杂度高，收益有限）
 
 这些都属于"投入远大于产出"的路径，除非业务明确进入 10 k+ TPS 单实例场景，否则不建议动。
@@ -723,7 +736,7 @@ async function queryRankList(req) {
 8. **`dogsvr_worker_eventloop_lag_seconds` histogram 上报路径**：本次窗口 no data，`perf_hooks.monitorEventLoopDelay` 采样可能没配或上报断了。这是识别 tick lag 最直接的 metric，比 pending 更精确，需要恢复。
 9. **补 07-12 login storm 的 profile**：重跑一次 login storm 并同时开 pyroscope 采样，坐实 "main tid 打满" 定量结论（见 §四 caveat）。
 10. **battle 场景测试**：`weightBattle > 0` 跑一次混合负载，观察 battlesvr Matter tick + zonesvr 转发 CPU 分布（第三条 hot path）。
-11. **SAB 实现层优化**（如 §5.7.5，可选）：head 定长二进制、稳态不 resetIndexes、worker pumpOnce 用 while、head+body 合并写。做完后 SAB 应能在小 body 场景稳定跑赢 postMessage。仅在确定 IPC 是瓶颈时才值得动。
+11. ~~**SAB 实现层优化**（§5.7.5）~~ —— **2026-09 已实施**。待办变为：复跑 `f_realistic_session` 对照确认现网收益，观察 pyroscope 里 `sab_ring.resetIndexes` 桶消失、`fallbackHits` 是否趋近 0。注意与 P0 / P1 串行验证。
 
 ---
 
@@ -733,7 +746,7 @@ async function queryRankList(req) {
 - **07-12 login storm 的 profile 缺失**：2.24 k/s 打满 main tid 的定量结论只有 `top` 观测，无 pyroscope 支持。
 - **`dogsvr_worker_eventloop_lag_seconds` 无数据**：本次窗口该 histogram 无采样，无法直接观测 tick lag。上报路径需排查。
 - **battle 场景未测**：bot 侧 `weightBattle=0` 关闭。
-- **混合场景（登录 + 稳态业务）未测**：主线程 + worker 同时受压时 SAB 收益、tid 曲线可能非线性。
+- **混合场景（登录 + 稳态业务）未测**：主线程 + worker 同时受压时 tid 曲线可能非线性。SAB 已于 2026-09 重写（§5.7.5），其现网收益同样需要在该场景下复测。
 - **主 isolate `Non JS threads activity` 内部结构未拆**：占 wall:cpu 55 %，但 libuv thread pool 具体是 fs / dns / crypto 里的哪些 op 目前没细拆。想进一步优化主线程需要下一层观测（`node:trace_events` 或 pyroscope 加 libuv 专项）。
 - **§7.4 C++ 对照的业务等价性未核对**：C++ 版 1847 TPS / P90 90 ms 是否与 dogsvr rank query 走完全相同的下游调用链（2× mongo find + 2× redis）尚未确认，见 §7.4.1。未核对前 §7.4.4 的实力线预估仅作参照方向。
 
