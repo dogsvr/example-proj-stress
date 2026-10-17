@@ -61,9 +61,15 @@ _2026-07-26 · 基于三次压测 + Pyroscope wall profile + Prometheus 指标_
   1. **短连接重连风暴**（`e_login_qps`）——瓶颈**结构上落在 zonesvr 主线程**：ws 握手 / 关闭链 / tsrpc 编解码 / socket writev 全部集中在主线程，业务 worker 用不到 18 %CPU。07-12 观测 QPS 上限约 **2.24 k connect+login/s** 时 main tid ≈ 100 %CPU（"%CPU"口径见 [§2.1](#21-三种主线程-cpu口径对照run2-rank3174-s-窗口)；**那次没保留 profile**，只有 07-18 · 1.38 k/s / tid 46.6 %CPU 的 profile 支持定性结论）。详见 §四。
   2. **长连接稳态业务**（`f_realistic_session` rank 查询）——瓶颈在 **worker 编解码 CPU** 与 **RoundRobin + bistable 分裂造成的 event loop 拥堵**：main tid 60~64 %CPU，两个 worker 分别 90 / 93 %CPU。当前配置天花板约 **3.1 k rank query/s**。详见 §五。
 - **重要辨别（§5.5）**：cmd p99 988 ms、`mongo_op_duration` p99 484 ms 看似是"mongo 慢"，其实**不是**——同 svr 的 w0 报出的 mongo p99 = 9 ms 才是这台 mongo 的真实延迟。w1 侧长尾是 event loop tick lag 把 `mongo_proxy.timedColl` 里的墙钟计时拉长，redis 五种独立 op 也同步长尾 10~14× 是决定性证据。真正的问题是 **RoundRobin 负载均衡把 w1 卡在深队列稳态**。
+
+  > **【2026-10 修正 · 已修复】** 分裂机制是"闭环压测 + 轮询"下的对称破缺（两侧相等的状态本身不稳定），不是"启动扰动越过临界"。dogsvr 默认 LB 已改为 leastLoad，同参数实测：两侧在途 440 / 440（原 15 / 874），QPS +6 %，p99 从 (500, 1000] ms 桶降到 (200, 500] ms 桶。**p99 不会回到 36 ms**：闭环下平均耗时 = 在途数 / 吞吐，由 bot 数决定。详见 [2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md)。
 - **用户"重连风暴 vs 普通业务分开分析"合理**：同一份代码两种压力下 CPU 分布相反（主线程 100 %CPU vs 64 %CPU，worker 18 %CPU vs 93 %CPU），瓶颈原因、扩容杠杆都不同。
 - **SAB vs postMessage 差异 < 4 %，进程 wall:cpu 反而 +10 %**：详见 §5.7。场景层面 IPC 只占 worker CPU ~5 %；实现层面当时每消息付两次 `Atomics.notify`，而唤醒一个 park 住的线程要 ~5.9 μs（同等屏障的 28 倍），这一项约占 wall:cpu 缺口的四分之一，是最大单项但非全部。**2026-09 已重写**（经典环形 + notify 消除），实测 notify 消除 99 %+、head 编解码 2.8×；现网收益待复测。
+
+  > **【2026-10 修正 · 已复测】** "进程 wall:cpu 反而 +10 %"是测量噪声：Pyroscope 约每 60 s 上传一块 profile，整段总量随窗口对齐浮动，同配置两次就差 9~10 %（§2.3 的补充）。按 /proc 线程 CPU 复测（leastLoad 下各 2 次），当前 SAB 相对 postMessage：QPS +2.5 %，每次请求进程 CPU −3.5 %，平均耗时 −1.8 %。SAB 优化是 2026-09 单独完成的，不属于 2026-10 的 LB 修复。详见 [2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md) §七。
 - **核心动作项**（按优先级，详见 §八）：调低压测 log.level → 换 lbStrategy: leastLoad + 加 worker 数 → 加 mongo/redis 缓存降下游依赖 → 补 pending / event_loop_lag 告警与 profile。
+
+  > **【2026-10】** leastLoad 已是 dogsvr 默认策略，不需要再配；加 worker 数与它无关，是独立的扩容项（[2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md)）。
 
 ---
 
@@ -97,12 +103,15 @@ _2026-07-26 · 基于三次压测 + Pyroscope wall profile + Prometheus 指标_
 | **`:(idle):0`** | 主线程 | ✅ | 名字虽叫 idle，实为主线程跑 native C++（syscall 用户态、ws sender native prep、`writev` / `writeUtf8String`、Buffer 编解码等）时 V8 CpuProfiler 抓不到 JS 帧的 fallback，是**真实 CPU**；`top -H` 一样把这部分计给主线程 tid。想彻底剔除这类噪音就直接看 `wall:wall`（pyroscope 硬编码把 idle 归零） |
 | **`:Non JS threads activity:0`** | libuv thread pool + V8 后台 optimize + pyroscope 采样线程 —— **各自独立 pthread、独立 tid** | ❌ | 在 `top -H` 里是**另外几行**，不计入主线程 tid 那一行；但会计入 `top` 里进程整行 %CPU |
 
+> **【2026-10 修正】这个桶的主体是 V8Worker，不是 libuv。** 2026-10-17 按 /proc 线程名统计 zonesvr 进程：4 个 `V8Worker` 线程每个约 0.17 核，合计约占进程 CPU 的 21 %。它们是 V8 平台线程池，进程内所有 isolate 共用，做 GC 的并发 / 并行部分和 JIT 后台编译。4 个 `libuv-worker` 合计约 0.01 核，3 个 `v8:ProfEvntProc`（CPU profiler 的事件线程）合计约 0.015 核。本文 §2.1、§4.2、§5.2 中"libuv thread pool + V8 后台 + pyroscope 采样线程"的说法都按此理解。详见 [2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md) §6.2。
+
 ### 2.3 使用建议
 
 - 想说 **"主线程 CPU 快满了" / "会先饱和"** → 用 `(wall:cpu − Non-JS) / window`；`idle` + `GC` 都在分子里。**本文档"main tid %CPU"统一采用此口径。**
 - 想说 **"业务 JS 代码本身有多忙"** → 用 `wall:wall / window`（idle 归零后的纯 JS 执行时长）。
 - 想对齐 **`top` 进程那一行 %CPU** → 用整个 isolate wall:cpu / window（含 Non-JS），或 `Σ (main + 所有 worker isolate).wall:cpu / window`（进程含所有 worker isolate 后总 CPU）。
 - **不要**混用：同一段分析里出现两种口径，读者一定会误读。旧 07-18 profile 报告里的 "main 59.6 %CPU" 是含 Non-JS 的进程视角，不是主线程 tid，已在本文档统一改写。
+- **【2026-10 补充】不要用 Pyroscope 的整段总量比较不同运行的 CPU 绝对值。** pyroscope-nodejs 约每 60 s 上传一块 profile，一个窗口包含几块取决于对齐位置；同配置跑两次，整段总量差 9~10 %，而 /proc 只差 0.7~1.5 %。Pyroscope 只用来看占比；绝对 CPU 用 `dogsvr_thread_cpu_utilization`（读 /proc），或按"占比 × /proc CPU"换算。§2.1 的 133.7 % / 60.5 %、§5.7 的 892 / 985 s 都是用整段总量算的，有同等误差。详见 [2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md) §7.4。
 
 ---
 
@@ -302,6 +311,8 @@ Ramp 阶段（60 s 内 QPS 0 → 3 k/s）任何微小的 service-rate 差异都�
 
 这是 **bistable dynamical system**：两个稳定平衡点（浅队列 / 深队列），初始扰动决定进哪一个，之间没有平滑过渡。
 
+> **【2026-10 修正】双稳态的判断对，但两个稳态是什么说错了。** 这里是闭环压测（bot 收到响应立刻发下一个），两侧在途数之和固定 ≈ 在线 bot 数。在这个负载下，"两侧都浅"的状态根本不存在；两侧相等的状态本身不稳定（山顶），两个稳态是镜像的"w0 浅 / w1 深"和"w0 深 / w1 浅"。所以 (a) 说的"要越过约 200 的临界"不成立，任何扰动都会触发分裂；(b) 说的"service_rate 被拉低到 ≈ arrival_rate"也不对，实际是闭环下 arrival 自动跟随较慢一侧。约 850 这个数就是在线 bot 数减去浅侧在途数。完整推导与实测见 [2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md)。
+
 #### 5.5.3 heap / GC 差异是被拉高的，不是根因
 
 - w1 heap 稳态 224 MB vs w0 156 MB：主要是 **队列里有 ~850 个 pending handler，每个持有 `reqMsg.body` + 若干 mongo response 引用**，object 生命周期被拉长几百倍 → new generation 里熬过 minor GC 的 object 变多 → heap 抬高。因果反过来。
@@ -319,6 +330,8 @@ Ramp 阶段（60 s 内 QPS 0 → 3 k/s）任何微小的 service-rate 差异都�
 2. **worker 数从 2 → 4**：LeastLoad 只在"单 worker 有明显服务能力冗余"时安全。当前 worker 已 90 %+ 单核，冗余薄，单换 LeastLoad 可能把"一侧慢"扩散成"两侧都慢"（w0 承接了 w1 挪出的 arrival、也逼近临界）。加 worker 数是让 LeastLoad 有余量可用的前提。分裂到"深队列稳态"的概率也是初始扰动的函数；worker 越多，每 worker arrival 越少，越难跨过临界。
 3. **加 pending 告警**：`dogsvr_worker_cmd_hdl_pending > 200` 报警——一旦分裂，越早看到越好。
 4. **可选：ramp 期改双段线性**（当前 60 s 线性 ramp 到 3 k/s，改成 120 s 总长：前 60 s 线性 ramp 到 1 k/s、后 60 s 从 1 k/s 线性 ramp 到 3 k/s）：把启动窗口的扰动源与稳态 QPS 拉开，减小 trigger 概率。仅辅助手段。
+
+> **【2026-10 修正】** 第 1 条已落地，且 leastLoad 已是 dogsvr 默认策略。"必须配合第 2 条"不成立：对同构 worker，JSQ（每次派给在途数最少的 worker）的吞吐不会低于轮询，实测 2 个 worker 直接换就是 +6 % QPS、两侧对称。第 2 条改为独立的扩容项。第 4 条无效：两侧相等的状态本身不稳定，放慢 ramp 防不住分裂。第 3 条见 §8-P1 的注。
 
 #### 5.5.6 LeastLoad 能识别 tick lag 吗
 
@@ -348,13 +361,19 @@ onMessageResolved(i)         → pending[i]--          (响应回到主线程时
 - 主线程 `pending[i]` 与 worker 内部真正的 `worker_cmd_hdl_pending` **不是同一个东西**——中间隔了通道 buffer。若 w1 已经卡但通道 buffer 还没满，主线程感知有延迟。
 - **tie-break 用 `indexOf(min)` 命中第一个最小值**：稳态 `pending=[0,0]` 时永远选 w0。极低 QPS 时会有短暂"全塞 w0" 窗口，通常无害。
 - **当 w1 长期慢**：LeastLoad 会持续把 arrival 挪向 w0，稳态两侧 pending 趋近相等但 QPS 分布严重倾斜。若 w0 也接近饱和（本次 90 %CPU+ 就是这种情况），可能把"一侧慢"扩散成"两侧都慢"。**LeastLoad 只在服务能力冗余明显（≥30 % 单 worker 余量）时安全，因此第 2 条加 worker 数是前提**。
+
+  > **【2026-10 修正】不成立。** 两侧都变慢是闭环满载下的正确结果：平均耗时 = 在途数 / 吞吐，leastLoad 把吞吐提高了，平均耗时反而下降（实测 268 → 250 ms）。只是快的一侧从 8 ms 升到约 230 ms，慢的一侧从约 508 ms 降到约 230 ms。没有"冗余 ≥30 %"这个前提。
 - **不能预防 GC / tier-up 本身发生**，只能限制它造成的 pending 尖峰。
 
 **更彻底的方案（不在当前修复范围内）**：让 LB 直接看 worker 端上报的 event loop lag（`perf_hooks.monitorEventLoopDelay`）而非 outstanding txn count——目前 `dogsvr_worker_eventloop_lag_seconds` histogram 在本次窗口 no data（上报路径可能断了或没配），是独立的观测缺口。
 
+> **【2026-10 修正】不是更彻底，而是更差。** event loop lag 按秒级采样，信号滞后，还容易让所有请求同时涌向同一个 worker（羊群效应）。在途 txn 数在主线程实时、精确更新，是派发时最好的信号。`dogsvr_worker_eventloop_lag_seconds` 在 2026-10 的窗口里已经有数据。
+
 ### 5.6 判断
 
 - **表面瓶颈**（`worker_cmd_hdl` p99 992 ms / mongo p99 484 ms）是 **event loop 拥堵的 readout**——见 §5.5。**LB 修复后大部分数字应显著回落**。
+
+  > **【2026-10 修正】** 实测是两侧收敛，不是全部回落：w1 侧回落，w0 侧上升，handler 平均耗时两侧都约 230 ms，mongo 平均两侧都约 60 ms；cmd 平均耗时只降 6 %（[2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md)）。闭环满载下要降耗时，只能靠下一条说的加 worker。
 - **修复后的真实瓶颈**（预估）：worker BSON + RESP + handler + GC 编解码 CPU（90 %CPU+）→ 堆 worker 数是主要杠杆。
 - **主线程 tid 60 %CPU 仍有余量**，加 worker 数到 4 之前主线程不会先饱和；到 8 worker 时（QPS ~10 k rank/s 估算）主线程会开始成为瓶颈。
 - SAB 在本场景不占优势（见 §5.7）。
@@ -364,6 +383,21 @@ onMessageResolved(i)         → pending[i]--          (响应回到主线程时
 ### 5.7 SAB 为什么没跑赢 postMessage
 
 **观察**：run1 postMessage vs run2 SAB，QPS 2977 → 3075（+3.3 %），p99 988 → 988 ms 持平，进程 wall:cpu total 892 s → 985 s（**+10 %**），rss 1128 MB → 1148 MB。SAB 换来的一点吞吐几乎正好被自己的 CPU 开销吃掉。
+
+> **【2026-10 修正 · 问题已解决】**
+>
+> 1. 这里的 +10 % 是 Pyroscope 整段总量的测量噪声（§2.3 的补充），不能说明 SAB 更费 CPU。QPS +3.3 % 来自各跑一次的结果，没有重复，同样无法判断是否超出噪声。
+> 2. 2026-09 的 SAB 优化（单独完成，见 §5.7.5）之后，按 /proc 线程 CPU 复测，leastLoad 下各跑 2 次：
+>
+> | 指标 | SAB #1 / #2 | postMessage #1 / #2 | SAB 相对 postMessage |
+> |---|---:|---:|---:|
+> | QPS | 3512 / 3514 | 3436 / 3419 | +2.5 % |
+> | 每次请求的进程 CPU | 974 / 959 µs | 1001 / 1003 µs | −3.5 % |
+> | 　其中日志线程 | 11 / 11 µs | 32 / 33 µs | −21.5 µs |
+> | IPC 的 JS 耗时（main + worker） | 12.6 / 13.8 µs | 27.2 / 27.4 µs | 约 −14 µs |
+> | 平均耗时 | 250.7 / 250.4 ms | 254.7 / 255.8 ms | −1.8 % |
+>
+> 最大的收益来自日志通道：`log.level: trace` 下每次请求有多行日志，postMessage 逐条发送，SAB 按批读取。`sab_ring.resetIndexes` 已从 profile 中消失。详见 [2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md) §七。
 
 #### 5.7.1 IPC 每 op 成本量化
 
@@ -381,6 +415,8 @@ onMessageResolved(i)         → pending[i]--          (响应回到主线程时
 结论：**SAB 版本每 op 主线程侧比 postMessage 多花 ~4 μs、worker 侧多 1~4 μs**。放到 3 k/s × 300 s = 90 万次消息上，累计 ~8.5 s 额外 CPU（main 4.28 + w0 4.00 + w1 1.23 μs/op × 9e5 ≈ 8.5 s），只解释了实测进程 wall:cpu +93 s 的 ~9 %。方向对，但量级远不够。
 
 > **【2026-09 补充】缺口的一部分已定位：`Atomics.notify`。** profile 只抽 self-time，而 notify 唤醒线程的 ~5.9 μs 绝大部分是 native 等待，落在 `:(idle):0` / `:Non JS threads activity:` 桶里，不计进上表任何一行。按每消息两次 notify × 90 万条估算约 10.6 s／单侧、双向 ~21 s，**约占缺口的四分之一**——是最大的单项，但不足以解释全部。其余仍未定位。
+
+> **【2026-10 修正】** 本节要解释的"+93 s 缺口"本身落在 Pyroscope 整段总量的噪声内（§2.3 的补充），"缺口占比"这笔账不再成立。上表的每 op 数也是用整段总量除以 QPS × 300 s 得到的，误差约 ±20 %；主线程 SAB 比 postMessage 多出的 IPC 开销（+49 %）大于这个误差，方向大概率可信。
 
 #### 5.7.2 实现层面：当前 SAB 的 fixed cost 项
 
@@ -434,6 +470,14 @@ onMessageResolved(i)         → pending[i]--          (响应回到主线程时
 
 > **现网收益待复测**：以上均为本机合成基准。§5.7.3 的判断不变——rank 场景 IPC 只占 worker CPU ~5 %，即便 IPC 归零端到端 QPS 上限也只 +5 % 左右。复跑 `f_realistic_session` 时注意 §8-P0（log.level）与 §8-P1（leastLoad + worker 2→4）都会改变 SAB 写入量与通道实例数，**三者必须串行验证**，否则效果不可区分。
 
+> **【2026-10 · 已复测】** rank 场景（场景 F，各 2 次）：SAB 相对 postMessage QPS +2.5 %、每次请求进程 CPU −3.5 %（见 §5.7 开头的注）。复测时 log.level 仍为 trace、worker 数仍为 2，LB 两组都是 leastLoad，满足上面的串行要求。
+>
+> - 第 5 条（notify 消除）在 main → worker 方向生效：main 侧 `commit` 自身耗时 0.3~0.6 µs/查询。
+> - worker → main 方向仍约每条回包唤醒一次 main：worker 侧 `commit` 自身耗时 5~7 µs/查询，推断来自 `Atomics.notify`。原因是 main 只用约 64 % CPU，读取端读空就进入等待。可选优化是 main 侧读空后先短暂轮询再等待，上限约 0.5 %。
+> - 登录场景未复测。
+>
+> 详见 [2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md) §7.3、§7.5。
+
 ---
 
 ## 六、分场景是否合理？—— 分析
@@ -449,6 +493,8 @@ onMessageResolved(i)         → pending[i]--          (响应回到主线程时
 | 主要故障模式 | 主线程被 native writev / stream close 抢 CPU | RoundRobin + bistable 分裂锁定 event loop 拥堵 |
 | 扩容杠杆 | 多进程 / 多实例（水平） | worker 数（垂直） |
 | SAB 收益 | 微降 rss，QPS 无变化 | +3 % QPS（进程 CPU 反而 +10 %，见 §5.7） |
+
+> **【2026-10 修正】** "SAB 收益"一行中的"进程 CPU 反而 +10 %"是测量噪声（§2.3 的补充）。2026-09 SAB 优化后的长连接稳态复测：QPS +2.5 %、每次请求 CPU −3.5 %（§5.7 开头的注）。短连接一列未复测。
 
 补充测试建议（本次未覆盖，作为遗留观测缺口，与 §九互补）：
 
@@ -520,6 +566,8 @@ _对照数据：某 C++ 实现服务器压测结果 "平均 1847 TPS，P90 90 ms
 绝对 TPS 上 dogsvr 更高（3075 vs 1847），但用了 3 个线程 + 5× CPU。**Node / C++ per-req CPU ≈ 2.8**（dogsvr 每 req 花 2.8 倍 C++ 的 CPU）——好于 §7.4.3 按组件加权估算的 Node / C++ ≈ 3~5 的预期。**但归因需谨慎**：(1) §7.4.3 的基准假设"C++ 同架构 + 各组件用 C++ 重写"，本节 C++ 对照是"单进程单线程"，不承担 dogsvr 的 main/worker 拆分与 IPC 成本（profile 里可辨认 ~15-20% 总 CPU）；(2) 从当前数据无法单独剥离"业务层 handler 代码"的效率，Node / C++ = 2.8 是**业务 + 框架 + 库合计的整体实测效率**。要拆开归因，需单独跑一次"关 logger + 简化 tsbuffer + skip IPC"的 baseline，把框架层减掉再对比。
 
 P99 差距（988 vs 90）看起来悬殊，但 dogsvr P99 的绝大部分来自 §5.5 的 **RoundRobin bistable 分裂**（event loop tick lag，不是真实 CPU 慢），修完 §8-P1 后 w1 侧 p99 应大幅回落到 w0 的 36 ms 量级。修复后再对齐一次才是公允比较。
+
+> **【2026-10 修正】** 修复后 p99 落在 (200, 500] ms 桶，不是 36 ms。dogsvr 这边的耗时由压测 bot 数决定（闭环，见 [2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md)），所以和 C++ 的 P90 90 ms 对齐，需要先确认两边压测在途数相同（§7.4.1 第 3 条）。
 
 #### 7.4.3 Node.js vs C++ 语言级差距（benchmark 数据）
 
@@ -642,6 +690,8 @@ Node / C++ ≈ 1 / (f_native + f_js / r_js)
 #### 7.4.5 结论
 
 - **短期实力线（P0+P1，1~2 天工作量）**：**~5500 TPS，P99 降到 ~50 ms 量级**，per-req CPU 仍 Node / C++ ≈ 2.7（略低于 §7.4.3 加权 3.1~3.5，同当前基线相同位置）。
+
+  > **【2026-10 修正】** "P99 ~50 ms"不成立：闭环压测下耗时 = 在途数 / 吞吐。2 个 worker 换 leastLoad 后实测是 3.5 k TPS、平均 250 ms（[2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md)）；按同样的 bot 数，加到 4 个 worker 后的耗时也只能按吞吐比例下降。
 - **中期实力线（P0+P1+P2，2~4 周工作量）**：**~7000 TPS，P99 可能进 30 ms**，per-req CPU Node / C++ ≈ 2.1——**低于加权 range 是因为 P2 的 rank list 缓存直接消除了 BSON + RESP decode 这两个 Node/C++ 差距最大（~5）的组件**（合并占 workload 21%），加权后主导项从 encode 类切到 syscall / async 类。**前提是 C++ 对照方不同步加缓存**——若 C++ 也做同样优化，Node/C++ 相对差距基本回到 2.7~3.1。
 - **理论下限（工程可达）**：**Node / C++ ≈ 1.8~2**，Node.js 在 dogsvr 架构下的现实上限。这是 GC + promise microtask + JS↔C++ 边界 + handler 必须走 JS 的**固有开销**，与业务无关。**追平 uWS.js 的 1.07 不可能**——那要求 handler 里几乎不跑 JS，与"用 Node 写业务"矛盾。详细 Amdahl 拆解见 §7.4.6。
 - **当前基线 (Node/C++ = 2.81) 相对预期**：在 §7.4.3 加权 3.1~3.5 range 偏下方 ~10%。**没有反常，不是"dogsvr 效率异常好"也不是"C++ 对照方异常烂"**——数据自洽。
@@ -722,7 +772,11 @@ async function queryRankList(req) {
    - 收益：预期 cmd p99 从 992 ms 回落到 w0 侧的 ~36 ms 量级（w1 分裂消除），QPS 上限升到 ~5.5 k rank/s。
    - 验证：跑 f_realistic_session 对照，检查 w0/w1 的 `worker_cmd_hdl_pending` 是否对称（都 <30）、`mongo_op_duration` p99 是否降到 ~10 ms 量级。
 
+   > **【2026-10 · 已完成 LB 部分】** leastLoad 已是 dogsvr 默认（[2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md)），2 个 worker 直接换即可，不存在"单独换有风险"。实测两侧在途对称，但都是约 440 而不是 <30；mongo 平均约 60 ms 而不是 10 ms；QPS 是 3.5 k 而不是 5.5 k——5.5 k 需要加 worker，那是独立的扩容实验（可用场景 C）。
+
 3. **加 Grafana alert**：`dogsvr_worker_cmd_hdl_pending > 200` 报警。当前 stress dashboard 里这个 series 无阈值。分裂事件早发现越好。
+
+   > **【2026-10】** 阈值 200 在闭环满载压测下会常亮（leastLoad 下每侧稳态约 440）。leastLoad 已经从机制上消除了分裂；如果仍要告警，应该看两侧在途数的比值，而不是绝对值。
 
 ### P2（进一步降 mongo/redis QPS）
 
@@ -738,16 +792,22 @@ async function queryRankList(req) {
 10. **battle 场景测试**：`weightBattle > 0` 跑一次混合负载，观察 battlesvr Matter tick + zonesvr 转发 CPU 分布（第三条 hot path）。
 11. ~~**SAB 实现层优化**（§5.7.5）~~ —— **2026-09 已实施**。待办变为：复跑 `f_realistic_session` 对照确认现网收益，观察 pyroscope 里 `sab_ring.resetIndexes` 桶消失、`fallbackHits` 是否趋近 0。注意与 P0 / P1 串行验证。
 
+    > **【2026-10 · 已完成】** 已复跑（leastLoad 下 SAB / postMessage 各 2 次）：`resetIndexes` 桶已消失，SAB fallback 速率为 0。结果见 §5.7 开头的注。
+
 ---
 
 ## 九、遗留问题
 
 - **w0/w1 分裂尚未通过实验验证**：分析定位到 RoundRobin + 启动窗口小扰动触发 bistable 分裂（§5.5）。需按 §8-P1 方案跑对照实验坐实。
-- **07-12 login storm 的 profile 缺失**：2.24 k/s 打满 main tid 的定量结论只有 `top` 观测，无 pyroscope 支持。
+  - **【2026-10 · 已验证并修复】** 机制已更正为闭环 + 轮询下的对称破缺。dogsvr 默认改为 leastLoad 后的 A/B 见 [2026-10-17 复测](2026-10-17-zonesvr-lb-fix.md)。剩余的未验证项：热更新期间 SAB 改为 init 后才开始消费的效果（没跑 `d_hot_update`）；4 次轮询都卡在 w1 的系统性偏向来源。
 - **`dogsvr_worker_eventloop_lag_seconds` 无数据**：本次窗口该 histogram 无采样，无法直接观测 tick lag。上报路径需排查。
+  - **【2026-10】** 2026-10-17 的窗口已有数据（4 min 均值：轮询 w0 0.010 s / w1 0.030 s，leastLoad 两侧 0.028 s）。
+- **07-12 login storm 的 profile 缺失**：2.24 k/s 打满 main tid 的定量结论只有 `top` 观测，无 pyroscope 支持。
 - **battle 场景未测**：bot 侧 `weightBattle=0` 关闭。
 - **混合场景（登录 + 稳态业务）未测**：主线程 + worker 同时受压时 tid 曲线可能非线性。SAB 已于 2026-09 重写（§5.7.5），其现网收益同样需要在该场景下复测。
+  - **【2026-10】** 长连接稳态（rank）场景已复测，SAB 胜过 postMessage（§5.7 开头的注）；混合场景与登录场景仍未测。
 - **主 isolate `Non JS threads activity` 内部结构未拆**：占 wall:cpu 55 %，但 libuv thread pool 具体是 fs / dns / crypto 里的哪些 op 目前没细拆。想进一步优化主线程需要下一层观测（`node:trace_events` 或 pyroscope 加 libuv 专项）。
+  - **【2026-10 · 已拆】** 主体是 4 个 V8Worker 线程（V8 的 GC / JIT 后台线程），libuv 线程池几乎不占 CPU，见 §2.2 的注。要压这一项应减少内存分配，而不是查 libuv。另外它不属于主线程 tid，优化主线程不需要动它。
 - **§7.4 C++ 对照的业务等价性未核对**：C++ 版 1847 TPS / P90 90 ms 是否与 dogsvr rank query 走完全相同的下游调用链（2× mongo find + 2× redis）尚未确认，见 §7.4.1。未核对前 §7.4.4 的实力线预估仅作参照方向。
 
 ---
