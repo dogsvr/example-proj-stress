@@ -37,7 +37,7 @@ _2026-07-26 · 基于三次压测 + Pyroscope wall profile + Prometheus 指标_
 - [七、容量预估](#七容量预估)
   - [7.1 zonesvr 单机上限](#71-zonesvr-单机上限当前配置1-main--2-worker)
   - [7.2 单实例 rss](#72-单实例-rss)
-  - [7.3 与业务参照数据的对齐](#73-与业务参照数据的对齐zone_limitmd)
+  - [7.3 与业务参照数据的对齐](#73-与业务参照数据的对齐)
   - [7.4 与 C++ 实现的对比与实力线预估](#74-与-c-实现的对比与实力线预估)
     - [7.4.1 前提假设（必须先核对）](#741-前提假设必须先核对)
     - [7.4.2 表面数字对比](#742-表面数字对比)
@@ -119,7 +119,7 @@ _2026-07-26 · 基于三次压测 + Pyroscope wall profile + Prometheus 指标_
 
 | 场景 | 报告目录 | QPS | main tid %CPU | worker %CPU | worker w0/w1 症状 | rss | 通道 | cmd p99 |
 |---|---|---:|---:|---:|---|---:|---|---:|
-| **e_login_qps** 07-12 | `2026-07-12T…-e_login_qps`（`zone_limit.md` 引述） | ~2.24 k/s | 观察 ≈ 100 %CPU（**无 profile**） | ≈ 50 %CPU | — | 600 MB（SAB）/ 720 MB（postMessage @1.4 k/s） | SAB | — |
+| **e_login_qps** 07-12 | `2026-07-12T…-e_login_qps` | ~2.24 k/s | 观察 ≈ 100 %CPU（**无 profile**） | ≈ 50 %CPU | — | 600 MB（SAB）/ 720 MB（postMessage @1.4 k/s） | SAB | — |
 | **e_login_qps** 07-18 · 有 profile | `2026-07-18T11-34-e_login_qps/summary.md` | 1.38 k login/s | **46.6 %CPU** | 17.6 / 17.7 %CPU | 对称 | — | postMessage | — |
 | **f_realistic_session · run1** | `2026-07-26T06-50-…` | 2977/s | **59.7 %CPU** | 88 / 93 %CPU | **w1 分裂**（详见 §5.5） | 1128 MB | postMessage | 988 ms |
 | **f_realistic_session · run2** | `2026-07-26T07-46-…` | 3075/s | **60.5 %CPU** | 90 / 93 %CPU | **w1 分裂**（详见 §5.5） | 1148 MB | SAB | 988 ms |
@@ -132,7 +132,7 @@ _2026-07-26 · 基于三次压测 + Pyroscope wall profile + Prometheus 指标_
 
 ## 四、场景一：短连接重连风暴（登录 QPS）
 
-_基础数据来自 `example-proj-stress/reports/2026-07-18T11-34-e_login_qps/summary.md` 里的 profile 分析；zone_limit.md 记录 07-12 的 2.24 k/s 上限观测。_
+_基础数据来自 `example-proj-stress/reports/2026-07-18T11-34-e_login_qps/summary.md` 里的 profile 分析。_
 
 ### 4.1 现象
 
@@ -240,7 +240,7 @@ Prometheus 稳态 metric（run2 SAB，`rate(...[4m])@t=07:51`）：
   - `redis.zRangeWithScores` × 1 （3061 QPS ✓）
   - `redis.zRevRank` × 1 （3060 QPS ✓）
 - **Mongo `find` p99 484 ms / Redis p99 99 ms** 表面看是 cmd p99 988 ms 的主要因子；但 484 ms 并非 mongo server 真实延迟，是 event loop tick lag 把 `mongo_proxy.timedColl` 的墙钟计时拉长的 readout——完整解释见 §5.5.1。真实 mongo p99 见 w0 一侧的 9 ms。
-- 主 pcu 参照（zone_limit.md）：全服 156 w PCU、单机 1~1.5 k PCU 主分布、峰值 2 k。当前 3.1 k rank/s ≈ 单机 1.5 k PCU 每人每 500 ms 一次的极端负载模型；实际业务节奏下 headroom 更大。
+- 主 pcu 参照：全服 156 w PCU、单机 1~1.5 k PCU 主分布、峰值 2 k。当前 3.1 k rank/s ≈ 单机 1.5 k PCU 每人每 500 ms 一次的极端负载模型；实际业务节奏下 headroom 更大。
 
 ### 5.5 Worker 之间的负载不均
 
@@ -521,14 +521,14 @@ _下面数字都基于"单机 + 当前 dogsvr / example-proj 配置 + 当前压�
 
 | 场景 | rss | 备注 |
 |---|---:|---|
-| 短连接稳态 @1.4 k/s postMessage | 720 MB | 07-12 观察，`zone_limit.md` 引述 |
+| 短连接稳态 @1.4 k/s postMessage | 720 MB | 07-12 观察 |
 | 短连接稳态 @2.2 k/s SAB | 600 MB | 07-12 观察，SAB 微降 rss |
 | 长连接稳态 @3.0 k/s postMessage | 1128 MB | run1 |
 | 长连接稳态 @3.1 k/s SAB | 1148 MB | run2 |
 
 长连接场景 rss 主要来自 worker heap（w1 稳态 224 MB，见 §5.5）；bistable 分裂被修复后 w1 heap 应回落到 w0 量级（~150 MB）。加 worker 数 rss 大致线性上升——8 worker 估 ≈ 2 GB。
 
-### 7.3 与业务参照数据的对齐（`zone_limit.md`）
+### 7.3 与业务参照数据的对齐
 
 - `ZoneRegistLimit.max_register_num = 41 000`，实际 zone 上限 4 w~6 w。
 - awx 单物理机 PCU 主分布 1~1.5 k，峰值 2 k。

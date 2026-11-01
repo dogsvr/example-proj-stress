@@ -24,6 +24,8 @@ const RTT_BUCKETS = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000
 let meterProvider: MeterProvider | null = null;
 let tracerProvider: NodeTracerProvider | null = null;
 let runId = '';
+// Fleet shards push identical series otherwise, and Prometheus keeps only one of them.
+let shard = '';
 
 let cmdRttHist: Histogram | null = null;
 let cmdErrorHist: Counter | null = null;
@@ -106,6 +108,7 @@ function startMetrics(opts: TelemetryOptions): void {
     const url = (opts.otlpBase ?? process.env.STRESS_BOTS_OTLP_ENDPOINT ?? DEFAULT_OTLP_ENDPOINT_BASE) + '/v1/metrics';
     const exporter = new OTLPMetricExporter({ url });
     runId = process.env.STRESS_RUN_ID ?? `pid-${process.pid}`;
+    shard = process.env.STRESS_SHARD_INDEX ?? '0';
 
     meterProvider = new MeterProvider({
         resource: makeResource(opts),
@@ -136,13 +139,13 @@ async function stopMetrics(): Promise<void> {
 
 export const cmdRtt = {
     record(ms: number, attrs: { cmd: string; scenario: string }): void {
-        cmdRttHist?.record(ms, { ...attrs, run_id: runId });
+        cmdRttHist?.record(ms, { ...attrs, run_id: runId, shard });
     },
 };
 
 export const cmdErrorTotal = {
     add(attrs: { cmd: string; scenario: string; kind: string }): void {
-        const a = { ...attrs, run_id: runId };
+        const a = { ...attrs, run_id: runId, shard };
         cmdErrorHist?.add(1, a);
         bumpMirror('bot_cmd_error_total', a, 1);
     },
@@ -150,7 +153,7 @@ export const cmdErrorTotal = {
 
 export const cmdSuccessTotal = {
     add(attrs: { cmd: string; scenario: string }): void {
-        const a = { ...attrs, run_id: runId };
+        const a = { ...attrs, run_id: runId, shard };
         cmdSuccessHist?.add(1, a);
         bumpMirror('bot_cmd_success_total', a, 1);
     },
@@ -158,7 +161,7 @@ export const cmdSuccessTotal = {
 
 export const cycleSuccessTotal = {
     add(attrs: { scenario: string; op?: string }): void {
-        const a = { ...attrs, run_id: runId } as Record<string, string>;
+        const a = { ...attrs, run_id: runId, shard } as Record<string, string>;
         cycleSuccessHist?.add(1, a);
         bumpMirror('bot_cycle_success_total', a, 1);
     },
@@ -166,20 +169,20 @@ export const cycleSuccessTotal = {
 
 export const cycleFailureTotal = {
     add(attrs: { scenario: string; phase: string; op?: string }): void {
-        const a = { ...attrs, run_id: runId } as Record<string, string>;
+        const a = { ...attrs, run_id: runId, shard } as Record<string, string>;
         cycleFailureHist?.add(1, a);
         bumpMirror('bot_cycle_failure_total', a, 1);
     },
 };
 
 export const activeBots = {
-    inc(scenario: string): void { activeBotsGauge?.add(1, { scenario, run_id: runId }); },
-    dec(scenario: string): void { activeBotsGauge?.add(-1, { scenario, run_id: runId }); },
+    inc(scenario: string): void { activeBotsGauge?.add(1, { scenario, run_id: runId, shard }); },
+    dec(scenario: string): void { activeBotsGauge?.add(-1, { scenario, run_id: runId, shard }); },
 };
 
 export const roomsJoined = {
-    inc(scenario: string): void { roomsJoinedGauge?.add(1, { scenario, run_id: runId }); },
-    dec(scenario: string): void { roomsJoinedGauge?.add(-1, { scenario, run_id: runId }); },
+    inc(scenario: string): void { roomsJoinedGauge?.add(1, { scenario, run_id: runId, shard }); },
+    dec(scenario: string): void { roomsJoinedGauge?.add(-1, { scenario, run_id: runId, shard }); },
 };
 
 export function classifyError(err: unknown): 'timeout' | 'disconnect' | 'server_error' | 'unknown' {

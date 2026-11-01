@@ -21,8 +21,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOTS_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 EXAMPLE_PROJ_DIR="$(cd "${BOTS_DIR}/../../example-proj" && pwd)"
-ZONESVR_CFG="${EXAMPLE_PROJ_DIR}/src/zonesvr/main_thread_config.json"
-ZONESVR_DIST_CFG="${EXAMPLE_PROJ_DIR}/dist/zonesvr/main_thread_config.json"
+ZONESVR_CFG="${EXAMPLE_PROJ_DIR}/src/servers/zonesvr/main_thread_config.json"
+ZONESVR_DIST_CFG="${EXAMPLE_PROJ_DIR}/dist/servers/zonesvr/main_thread_config.json"
 
 DURATION_MS="${DURATION_MS:-180000}"
 RAMP_MS="${RAMP_MS:-30000}"
@@ -36,7 +36,7 @@ patch_worker_count() {
     node -e "
         const fs = require('fs');
         for (const f of ['${ZONESVR_CFG}', '${ZONESVR_DIST_CFG}']) {
-            if (!fs.existsSync(f)) continue;
+            if (!fs.existsSync(f)) throw new Error('config not found: ' + f);
             const j = JSON.parse(fs.readFileSync(f, 'utf-8'));
             j.workerThreadNum = ${n};
             fs.writeFileSync(f, JSON.stringify(j, null, 4) + '\n');

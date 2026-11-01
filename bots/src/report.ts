@@ -121,19 +121,22 @@ function buildSummary(input: ReportInputs): string {
 }
 
 function collectGitRevisions(): string {
+    // dist/ → bots/ → example-proj-stress/ → the polyrepo root.
+    const root = path.resolve(__dirname, '../../..');
     const repos = [
-        '../../../../dogsvr',
-        '../../../../cl-tsrpc',
-        '../../../../cl-grpc',
-        '../../../../cfg-luban',
-        '../../../../example-proj-cfg',
-        '../../../../example-proj',
-        '../../../../example-proj-client',
-        '../../../../logger',
+        'dogsvr',
+        'logger',
+        'cl-tsrpc',
+        'cl-grpc',
+        'cfg-luban',
+        'example-proj-cfg',
+        'example-proj',
+        'example-proj-client',
+        'example-proj-stress',
     ];
     const lines: string[] = [];
     for (const rel of repos) {
-        const abs = path.resolve(__dirname, rel);
+        const abs = path.join(root, rel);
         if (!fs.existsSync(abs)) continue;
         try {
             const sha = execSync(`git -C "${abs}" rev-parse HEAD 2>/dev/null`).toString().trim();

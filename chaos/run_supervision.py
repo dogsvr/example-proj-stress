@@ -502,21 +502,22 @@ def case_rolling(args):
     time.sleep(0.15)
     r2 = trigger()
     th1.join()
-    # The CLI can return on the ignored trigger's reply, so completion comes from the log.
+    # Completion comes from the log, so the CLI return time can be judged against it.
     done_ts = wait_log('rolling hot update complete: all workers replaced', off, 30)['time'] / 1000
     time.sleep(1)
     new = [serving_tid(0), serving_tid(1)]
     rep.note('C1', {'first': r1, 'second': r2, 'old_tids': old, 'new': new, 'done_ts': done_ts})
     rep.check('C1 第一次触发成功', 'hotUpdate done' in r1['out'], r1['out'][-200:])
-    rep.check('C1 第一个 CLI 在热更新完成后才返回（缺陷 3：预期 FAIL）', r1['t1'] >= done_ts,
+    rep.check('C1 第一个 CLI 在热更新完成后才返回', r1['t1'] >= done_ts,
               f'CLI 返回比完成{"晚" if r1["t1"] >= done_ts else "早"} {abs(r1["t1"] - done_ts):.2f} s')
     rep.check('C1 两槽都换成 v2 新 worker', all(n['ver'] == 'v2' and n['tid'] not in old for n in new),
               f'{[(n["tid"], n["ver"]) for n in new]}')
     stopped = logs_with('old worker stopped', off)
     rep.check('C1 旧 worker 均正常排空', len(stopped) == 2 and all(r.get('reason') == 'drained gracefully' for r in stopped),
               f'{[r.get("reason") for r in stopped]}')
-    ignored = logs_with('hotUpdate called while already updating, ignoring', off)
-    rep.check('C1 重复触发被忽略（F3：回复内容见实测）', len(ignored) == 1, f'忽略 {len(ignored)} 次；第二次回复：{r2["out"][-120:]!r}')
+    joined = logs_with('hotUpdate called while already updating, joining it', off)
+    rep.check('C1 重复触发并入进行中的热更新', len(joined) == 1 and 'hotUpdate done' in r2['out'] and r2['t1'] >= done_ts,
+              f'并入 {len(joined)} 次；第二次回复：{r2["out"][-120:]!r}')
     rep.check('C1 期间 0 失败', failures_in(r1['t0'] - 1, done_ts + 6) == 0,
               f'{failures_in(r1["t0"] - 1, done_ts + 6):.0f}')
 
@@ -560,7 +561,8 @@ def case_rolling(args):
     s0, s1 = serving_tid(0), serving_tid(1)
     rep.note('C4', {'trigger': r, 'slot0': s0, 'slot1': s1})
     rep.check('C4 回复 aborted at slot 1', 'aborted at slot 1' in r['out'], r['out'][-200:])
-    rep.check('C4 版本混杂：槽 0 = v3、槽 1 = v2（F2）', s0['ver'] == 'v3' and s1['ver'] == 'v2', f'{s0["ver"]} / {s1["ver"]}')
+    rep.check('C4 回复写明槽 0 已换成新代码', 'slots 0 already on the new code' in r['out'], r['out'][-200:])
+    rep.check('C4 版本混杂：槽 0 = v3、槽 1 = v2（rolling 设计如此）', s0['ver'] == 'v3' and s1['ver'] == 'v2', f'{s0["ver"]} / {s1["ver"]}')
     rep.check('C4 期间 0 失败', failures_in(r['t0'] - 1, r['t1'] + 6) == 0, f'{failures_in(r["t0"] - 1, r["t1"] + 6):.0f}')
 
     # C5: the serving worker of slot 0 crashes while its own candidate initialises.
@@ -804,12 +806,12 @@ def case_allatonce(args):
     th2.join()
     time.sleep(2)
     stopped = logs_with('old worker stopped', off)
-    ignored = logs_with('hotUpdate called while already updating, ignoring', off)
+    joined = logs_with('hotUpdate called while already updating, joining it', off)
     gen_c = [serving_tid(0), serving_tid(1)]
     rep.note('D1', {'r1': r1, 'r2': r2, 'r3': r3, 'gen_a': gen_a, 'gen_c': gen_c,
                     'stopped': [(s['time'], s.get('workerIndex'), s.get('reason')) for s in stopped]})
-    rep.check('D1 三次触发：第 1、2 次执行、第 3 次被忽略', 'hotUpdate done' in r1['out'] and len(ignored) == 1,
-              f'忽略 {len(ignored)} 次；回复 {[x["out"][-40:] for x in (r1, r2, r3)]}')
+    rep.check('D1 三次触发：第 1、2 次执行、第 3 次并入第 2 次', all('hotUpdate done' in x['out'] for x in (r1, r2, r3)) and len(joined) == 1,
+              f'并入 {len(joined)} 次；回复 {[x["out"][-40:] for x in (r1, r2, r3)]}')
     rep.check('D1 最终两槽都是 v3', all(g['ver'] == 'v3' for g in gen_c), f'{[(g["tid"], g["ver"]) for g in gen_c]}')
     first_c_load = min((e['ts'] for e in events(r1['t0']) if e['e'] == 'load' and e['ver'] == 'v3'), default=None)
     a_stop = [s['time'] for s in stopped[:2]]
@@ -827,7 +829,7 @@ def case_allatonce(args):
     time.sleep(1)
     rep.note('D2', {'trigger': r})
     rep.check('D2 中止', 'aborted at slot' in r['out'], r['out'][-200:])
-    rep.check('D2 报错槽位为 1（F1：预期错报为 0）', 'aborted at slot 1' in r['out'], r['out'][-120:])
+    rep.check('D2 报错槽位为 1', 'aborted at slot 1' in r['out'], r['out'][-120:])
     rep.check('D2 两个旧 worker 都保留', [serving_tid(0)['tid'], serving_tid(1)['tid']] == cur, f'{cur}')
     rep.check('D2 期间 0 失败', failures_in(r['t0'] - 1, r['t1'] + 6) == 0, f'{failures_in(r["t0"] - 1, r["t1"] + 6):.0f}')
     bots.wait()

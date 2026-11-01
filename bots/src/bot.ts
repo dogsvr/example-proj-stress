@@ -16,6 +16,11 @@ import type {
 import { cmdRtt, cmdSuccessTotal, cmdErrorTotal, classifyError, startClientSpan, injectTraceHead } from './otel_client';
 import { log } from './log';
 
+// Server-side failures arrive as call.succ with a non-zero head.errCode.
+function checkErrCode(cmd: string, head: { errCode?: number; errMsg?: string }): void {
+    if (head.errCode) throw new Error(`${cmd} failed: errCode ${head.errCode} ${head.errMsg ?? ''}`);
+}
+
 export interface BotEndpoints {
     dirHost: string;
     dirPort: number;
@@ -95,6 +100,7 @@ export class Bot {
                     cmdErrorTotal.add({ cmd: 'DIR_QUERY_ZONE_LIST', scenario: this.scenario, kind: 'server_error' });
                     throw new Error(ret.err.message);
                 }
+                checkErrCode('DIR_QUERY_ZONE_LIST', ret.res.head);
                 cmdRtt.record(Number(process.hrtime.bigint() - start) / 1e6, { cmd: 'DIR_QUERY_ZONE_LIST', scenario: this.scenario });
                 cmdSuccessTotal.add({ cmd: 'DIR_QUERY_ZONE_LIST', scenario: this.scenario });
                 return JSON.parse(ret.res.innerRes as string) as DirQueryZoneListRes;
@@ -128,6 +134,7 @@ export class Bot {
                     cmdErrorTotal.add({ cmd: 'ZONE_LOGIN', scenario: this.scenario, kind: 'server_error' });
                     throw new Error(`ZONE_LOGIN failed: ${ret.err.message}`);
                 }
+                checkErrCode('ZONE_LOGIN', ret.res.head);
                 cmdRtt.record(Number(process.hrtime.bigint() - start) / 1e6, { cmd: 'ZONE_LOGIN', scenario: this.scenario });
                 cmdSuccessTotal.add({ cmd: 'ZONE_LOGIN', scenario: this.scenario });
                 const res = JSON.parse(ret.res.innerRes as string) as ZoneLoginRes;
@@ -169,6 +176,7 @@ export class Bot {
                     cmdErrorTotal.add({ cmd: 'ZONE_START_BATTLE', scenario: this.scenario, kind: 'server_error' });
                     throw new Error(`ZONE_START_BATTLE failed: ${ret.err.message}`);
                 }
+                checkErrCode('ZONE_START_BATTLE', ret.res.head);
                 cmdRtt.record(Number(process.hrtime.bigint() - start) / 1e6, { cmd: 'ZONE_START_BATTLE', scenario: this.scenario });
                 cmdSuccessTotal.add({ cmd: 'ZONE_START_BATTLE', scenario: this.scenario });
                 return JSON.parse(ret.res.innerRes as string) as ZoneStartBattleRes;
@@ -207,6 +215,7 @@ export class Bot {
                     cmdErrorTotal.add({ cmd: 'ZONE_HEARTBEAT', scenario: this.scenario, kind: 'server_error' });
                     throw new Error(`ZONE_HEARTBEAT failed: ${ret.err.message}`);
                 }
+                checkErrCode('ZONE_HEARTBEAT', ret.res.head);
                 cmdRtt.record(Number(process.hrtime.bigint() - start) / 1e6, { cmd: 'ZONE_HEARTBEAT', scenario: this.scenario });
                 cmdSuccessTotal.add({ cmd: 'ZONE_HEARTBEAT', scenario: this.scenario });
                 JSON.parse(ret.res.innerRes as string) as ZoneHeartbeatRes;
@@ -232,6 +241,7 @@ export class Bot {
                     cmdErrorTotal.add({ cmd: 'ZONE_QUERY_RANK_LIST', scenario: this.scenario, kind: 'server_error' });
                     throw new Error(`ZONE_QUERY_RANK_LIST failed: ${ret.err.message}`);
                 }
+                checkErrCode('ZONE_QUERY_RANK_LIST', ret.res.head);
                 cmdRtt.record(Number(process.hrtime.bigint() - start) / 1e6, { cmd: 'ZONE_QUERY_RANK_LIST', scenario: this.scenario });
                 cmdSuccessTotal.add({ cmd: 'ZONE_QUERY_RANK_LIST', scenario: this.scenario });
                 return JSON.parse(ret.res.innerRes as string) as ZoneQueryRankListRes;

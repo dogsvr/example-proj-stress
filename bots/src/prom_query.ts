@@ -62,7 +62,7 @@ export async function queryFinalCounters(input: QueryFinalCountersInput): Promis
                     queryScalar(base, rttQuantile(0.50, labelSel, windowSec), queryTime),
                     queryScalar(base, rttQuantile(0.95, labelSel, windowSec), queryTime),
                     queryScalar(base, rttQuantile(0.99, labelSel, windowSec), queryTime),
-                    queryScalar(base, `max_over_time(bot_active_count${labelSel}[${windowSec}s])`, queryTime),
+                    queryScalar(base, `max_over_time(sum(bot_active_count${labelSel})[${windowSec}s:5s])`, queryTime),
                 ]);
                 return {
                     ok: true,

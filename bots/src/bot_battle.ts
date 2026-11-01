@@ -79,9 +79,13 @@ export async function runBattleSession(
     roomsJoined.inc(bot.scenario);
 
     let leftEarly = false;
+    let leaving = false;
+    let abnormalCode: number | null = null;
     room.onLeave((code) => {
         if (code !== 1000 && code !== 1001) {
             log.debug({ sessionId: room.sessionId, code, scenario: bot.scenario }, 'colyseus onLeave abnormal');
+            // The server never ends a session itself, so an abnormal close before our leave is a lost battle.
+            if (!leaving) abnormalCode = code;
         }
         leftEarly = true;
     });
@@ -123,6 +127,7 @@ export async function runBattleSession(
             try { room.send('reportKills', 0); } catch { /* noop */ }
         }
         try {
+            leaving = true;
             const leavePromise = room.leave(!signal.aborted);
             await Promise.race([
                 leavePromise,
@@ -135,5 +140,9 @@ export async function runBattleSession(
     roomsJoined.dec(bot.scenario);
 
     if (signal.aborted) throw new BotAbortError('battle aborted on shutdown');
+    if (abnormalCode !== null) {
+        cmdErrorTotal.add({ cmd: 'COLYSEUS_ROOM', scenario: bot.scenario, kind: 'disconnect' });
+        throw new Error(`colyseus room closed abnormally: code ${abnormalCode}`);
+    }
 }
 
