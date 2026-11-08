@@ -14,6 +14,7 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
+import { TsrpcErrorType, type TsrpcError } from 'tsrpc';
 
 const DEFAULT_OTLP_ENDPOINT_BASE = 'http://localhost:4318';
 const TRACER_NAME = 'stress-bots';
@@ -144,7 +145,8 @@ export const cmdRtt = {
 };
 
 export const cmdErrorTotal = {
-    add(attrs: { cmd: string; scenario: string; kind: string }): void {
+    /** err_code only for server_error from an ApiError. */
+    add(attrs: { cmd: string; scenario: string; kind: string; err_code?: string }): void {
         const a = { ...attrs, run_id: runId, shard };
         cmdErrorHist?.add(1, a);
         bumpMirror('bot_cmd_error_total', a, 1);
@@ -185,11 +187,32 @@ export const roomsJoined = {
     dec(scenario: string): void { roomsJoinedGauge?.add(-1, { scenario, run_id: runId, shard }); },
 };
 
-export function classifyError(err: unknown): 'timeout' | 'disconnect' | 'server_error' | 'unknown' {
+export type ErrorKind = 'timeout' | 'disconnect' | 'server_error' | 'unknown';
+
+/** A failed tsrpc callApi, classified from its TsrpcError rather than from message text. */
+export class CmdError extends Error {
+    readonly kind: ErrorKind;
+    readonly errCode: string | number | undefined;
+
+    constructor(cmd: string, err: TsrpcError) {
+        super(`${cmd} failed: ${err.message}`);
+        this.name = 'CmdError';
+        this.errCode = err.type === TsrpcErrorType.ApiError ? err.code : undefined;
+        switch (err.type) {
+            case TsrpcErrorType.NetworkError: this.kind = err.code === 'TIMEOUT' ? 'timeout' : 'disconnect'; break;
+            case TsrpcErrorType.ApiError:
+            case TsrpcErrorType.ServerError: this.kind = 'server_error'; break;
+            default: this.kind = 'unknown';
+        }
+    }
+}
+
+export function classifyError(err: unknown): ErrorKind {
+    if (err instanceof CmdError) return err.kind;
     const msg = String((err as { message?: string })?.message ?? err ?? '').toLowerCase();
     if (msg.includes('timeout')) return 'timeout';
     if (msg.includes('disconnect') || msg.includes('closed') || msg.includes('econnrefused') || msg.includes('econnreset')) return 'disconnect';
-    if (msg.includes('errcode') || msg.includes('not authorized') || msg.includes('invalid')) return 'server_error';
+    if (msg.includes('not authorized') || msg.includes('invalid')) return 'server_error';
     return 'unknown';
 }
 

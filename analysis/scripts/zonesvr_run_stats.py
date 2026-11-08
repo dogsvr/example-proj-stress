@@ -130,7 +130,7 @@ def prom_rows(run, url, cmd):
         ('per query main / worker / internal / logger (us)', [1e6 * roles.get(k, float('nan')) / qps for k in ('main', 'worker', 'internal', 'logger_central')], 0),
         ('per query process total (us)', 1e6 * total / qps, 0),
         ('rss peak (MB)', p.scalar(f'max_over_time(dogsvr_process_rss_bytes{{{Z}}}[$W])') / 1e6, 0),
-        ('SAB fallback rate (/s)', p.scalar(f'sum(rate(dogsvr_msg_channel_fallback_total{{{Z}}}[$W]))'), 2),
+        ('SAB full rate (/s)', p.scalar(f'sum(rate(dogsvr_msg_channel_sab_full_total{{{Z}}}[$W]))'), 2),
     ]
     return rows
 

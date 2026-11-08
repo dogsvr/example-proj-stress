@@ -126,12 +126,12 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Msg channel: postMessage fallback rate (msg/s)",
-      "description": "Rate of frames that missed SAB and fell back to postMessage. Expected to be zero - the writer only refuses when the ring is genuinely full. Sustained non-zero means the consumer is falling behind; check worker event-loop lag before resizing channel.msg.sabSizeBytes.",
+      "title": "Msg channel: SAB full rate (msg/s)",
+      "description": "Rate of frames the SAB ring had no room for; each is then sent via postMessage or dropped, per msgChannel.fallbackOnFull. Expected to be zero - the writer only refuses when the ring is genuinely full. Sustained non-zero means the consumer is falling behind; check worker event-loop lag before resizing channel.msg.sabSizeBytes.",
       "gridPos": { "h": 8, "w": 8, "x": 8, "y": 28 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{
-        "expr": "sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_fallback_total[1m]))",
+        "expr": "sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_sab_full_total[1m]))",
         "legendFormat": "{{svr}}/w{{worker_index}}/{{side}}",
         "refId": "A"
       }],
@@ -154,12 +154,12 @@
     {
       "id": 12,
       "type": "timeseries",
-      "title": "Msg channel: fallback ratio (%)",
-      "description": "fallback / (SAB + fallback). 0% = pure SAB, the expected steady state. Any sustained non-zero value means the consumer is not keeping up.",
+      "title": "Msg channel: SAB full ratio (%)",
+      "description": "SAB full / (SAB written + SAB full). 0% = pure SAB, the expected steady state. Any sustained non-zero value means the consumer is not keeping up.",
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 28 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [{
-        "expr": "100 * sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_fallback_total[1m])) / (sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_sab_hits_total[1m])) + sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_fallback_total[1m])))",
+        "expr": "100 * sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_sab_full_total[1m])) / (sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_sab_hits_total[1m])) + sum by (svr, side, worker_index) (rate(dogsvr_msg_channel_sab_full_total[1m])))",
         "legendFormat": "{{svr}}/w{{worker_index}}/{{side}}",
         "refId": "A"
       }],

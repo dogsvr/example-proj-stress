@@ -26,8 +26,8 @@ EVENTS = CHAOS / 'events.ndjson'
 PROM = 'http://127.0.0.1:9090'
 APP = 'exp-zonesvr'
 
-FAIL = 'dogsvr_cmd_duration_milliseconds_count{svr="zonesvr",ok="0"}'
-OK_RANK = 'dogsvr_cmd_duration_milliseconds_count{svr="zonesvr",cmdId="20004",ok="1"}'
+FAIL = 'dogsvr_cmd_duration_milliseconds_count{svr="zonesvr",err_code!="0"}'
+OK_RANK = 'dogsvr_cmd_duration_milliseconds_count{svr="zonesvr",cmdId="20004",err_code="0"}'
 TIMEOUTS = 'dogsvr_txn_timeout_total{svr="zonesvr"}'
 
 
@@ -441,8 +441,8 @@ def case_crash(args):
             rep.check(f'{lab} 失败数 ≈ 崩溃前在途数（0.7~1.3×）', 0.7 * inflight <= fails <= 1.3 * inflight,
                       f'失败 {fails:.0f}，在途 {inflight:.0f}')
         else:
-            fast = D('dogsvr_cmd_duration_milliseconds_bucket{svr="zonesvr",ok="0",le="0.5"}', t_ex - 0.5, t_rd + 6)
-            slow = fails - D('dogsvr_cmd_duration_milliseconds_bucket{svr="zonesvr",ok="0",le="2000"}', t_ex - 0.5, t_rd + 6)
+            fast = D('dogsvr_cmd_duration_milliseconds_bucket{svr="zonesvr",err_code!="0",le="0.5"}', t_ex - 0.5, t_rd + 6)
+            slow = fails - D('dogsvr_cmd_duration_milliseconds_bucket{svr="zonesvr",err_code!="0",le="2000"}', t_ex - 0.5, t_rd + 6)
             c['fast_failures'] = fast
             rep.check('A5 两槽都空时请求立即失败（≤0.5 ms 桶）', fast > 0, f'失败 {fails:.0f}，其中 ≤0.5 ms {fast:.0f}，在途 {inflight:.0f}')
             rep.check('A5 没有失败耗时 ≥ 2 s', slow == 0, f'{slow:.0f}')
@@ -756,8 +756,8 @@ def case_startup_allfail(args):
     t1 = max(probe.t_end + 8, rs['t_restart'] + 20)
     wait_until(t1 + 1)
     fails = V(FAIL, t1)
-    fast = V('dogsvr_cmd_duration_milliseconds_bucket{svr="zonesvr",ok="0",le="0.5"}', t1)
-    oks = V('dogsvr_cmd_duration_milliseconds_count{svr="zonesvr",ok="1"}', t1)
+    fast = V('dogsvr_cmd_duration_milliseconds_bucket{svr="zonesvr",err_code!="0",le="0.5"}', t1)
+    oks = V('dogsvr_cmd_duration_milliseconds_count{svr="zonesvr",err_code="0"}', t1)
     rep.check('无可用 worker 时请求全部立即失败（≤0.5 ms）', fails > 0 and fast / fails >= 0.99 and oks == 0,
               f'失败 {fails:.0f}，≤0.5 ms {fast:.0f}，成功 {oks:.0f}')
     restore_worker_cfg()
@@ -867,9 +867,9 @@ def case_hotupdate_perf(args):
     t0, t1 = bots.t0, bots.t_end
     series = {}
     for name, sel in (('cnt', OK_RANK),
-                      ('le500', 'dogsvr_cmd_duration_milliseconds_bucket{svr="zonesvr",cmdId="20004",ok="1",le="500"}'),
-                      ('le1000', 'dogsvr_cmd_duration_milliseconds_bucket{svr="zonesvr",cmdId="20004",ok="1",le="1000"}'),
-                      ('le2000', 'dogsvr_cmd_duration_milliseconds_bucket{svr="zonesvr",cmdId="20004",ok="1",le="2000"}'),
+                      ('le500', 'dogsvr_cmd_duration_milliseconds_bucket{svr="zonesvr",cmdId="20004",err_code="0",le="500"}'),
+                      ('le1000', 'dogsvr_cmd_duration_milliseconds_bucket{svr="zonesvr",cmdId="20004",err_code="0",le="1000"}'),
+                      ('le2000', 'dogsvr_cmd_duration_milliseconds_bucket{svr="zonesvr",cmdId="20004",err_code="0",le="2000"}'),
                       ('fail', FAIL), ('timeout', TIMEOUTS)):
         res = prom_range(f'sum(last_over_time({sel}[15s]))', t0, t1, step)
         series[name] = {float(ts): float(v) for ts, v in (res[0]['values'] if res else [])}

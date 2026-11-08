@@ -335,9 +335,11 @@ Please report this issue to the developers.
 
 服务没起或 port 错。检查 `pm2 ls`,确认三个 svr 都 online。
 
-### bot 报 `ZONE_LOGIN failed: invalid name`
+### bot 报 `ZONE_LOGIN failed: 1005`
 
-`stress:fill` 没跑,或 zoneId 不对。`role_coll` 里没有 `openId=stress_*` 记录。
+1005 = 角色名不合法:`stress:fill` 没跑,或 zoneId 不对。`role_coll` 里没有 `openId=stress_*` 记录。
+
+服务端返回错误码时 bot 报 `<CMD> failed: <错误码>`(1–1000 的框架码显示为名字,如 `dogsvr.NO_WORKER`),并计入 `bot_cmd_error_total{kind="server_error",err_code="<错误码>"}`。业务码含义见 `example-proj/docs/reference/error_codes.md`,框架码见 `dogsvr/docs/reference/error_codes.md`;具体原因只在服务端日志里。
 
 ### bot 程序到了 `--duration` 还不结束
 
